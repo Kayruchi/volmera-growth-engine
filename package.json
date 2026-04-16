@@ -1,0 +1,9 @@
+{
+  "name": "volmera-growth-engine",
+  "version": "1.0.0",
+  "description": "Volmera Growth Engine — LinkedIn outreach automation",
+  "type": "module",
+  "dependencies": {
+    "googleapis": "^144.0.0"
+  }
+}
