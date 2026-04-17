@@ -11,6 +11,7 @@ import { glog } from './growth-logger.js';
 import { acquireLock, releaseLock, getActiveLocks, isAnyGrowthJobRunning } from './growth-lock.js';
 import { getStatusCounts } from './growth-sheets.js';
 import { runCrawl, crawlProgress, DEFAULT_SEARCH_URL } from './growth-crawl.js';
+import { runFetch, fetchProgress, DEFAULT_FETCH_LIMIT } from './growth-fetch.js';
 import { readFileSync, writeFileSync, existsSync } from 'fs';
 
 const __dirname   = path.dirname(fileURLToPath(import.meta.url));
@@ -133,6 +134,11 @@ router.get('/api/growth/crawl-progress', requireSecret, (_req, res) => {
   res.json(crawlProgress);
 });
 
+// GET /api/growth/fetch-progress
+router.get('/api/growth/fetch-progress', requireSecret, (_req, res) => {
+  res.json(fetchProgress);
+});
+
 // ── JOB TRIGGERS ─────────────────────────────────────────────────────────────
 
 // POST /api/growth/crawl
@@ -157,12 +163,23 @@ router.post('/api/growth/crawl', requireSecret, async (req, res) => {
 });
 
 // POST /api/growth/fetch
-router.post('/api/growth/fetch', requireSecret, async (_req, res) => {
+router.post('/api/growth/fetch', requireSecret, async (req, res) => {
   if (!acquireLock('fetch')) {
-    return res.status(409).json({ error: 'Another job is already running. Check /api/growth/locks.' });
+    return res.status(409).json({ error: 'Fetch job already running.' });
   }
-  res.json({ message: 'Fetch job will be available in Phase 2' });
-  releaseLock('fetch');
+
+  const limit = Number(req.body?.limit) || DEFAULT_FETCH_LIMIT;
+  res.json({ message: 'Fetch started', limit });
+
+  runFetch({ limit })
+    .then(result => {
+      const state = readJobState();
+      state.lastFetch = result;
+      saveJobState(state);
+      glog.info('[Routes] Fetch complete, state saved');
+    })
+    .catch(e => glog.error('[Routes] Fetch failed', e))
+    .finally(() => releaseLock('fetch'));
 });
 
 // POST /api/growth/enrich
