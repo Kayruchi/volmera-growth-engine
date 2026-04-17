@@ -1,9 +1,0 @@
-{
-  "crawl": { "status": "idle", "updatedAt": null },
-  "fetch": { "status": "idle", "count": 0, "errors": 0, "updatedAt": null },
-  "enrich": { "status": "idle", "count": 0, "errors": 0, "updatedAt": null },
-  "pulse": { "status": "idle", "count": 0, "errors": 0, "updatedAt": null },
-  "invite": { "status": "idle", "count": 0, "updatedAt": null },
-  "message": { "status": "idle", "updatedAt": null },
-  "followup": { "status": "idle", "updatedAt": null }
-}
