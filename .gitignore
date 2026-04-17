@@ -1,0 +1,4 @@
+node_modules/
+data-growth/growth.log
+data-growth/growth-errors.log
+.env

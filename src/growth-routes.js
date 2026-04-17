@@ -10,6 +10,7 @@ import { google } from 'googleapis';
 import { glog } from './growth-logger.js';
 import { acquireLock, releaseLock, getActiveLocks, isAnyGrowthJobRunning } from './growth-lock.js';
 import { getStatusCounts } from './growth-sheets.js';
+import { runCrawl, crawlProgress, DEFAULT_SEARCH_URL } from './growth-crawl.js';
 import { readFileSync, writeFileSync, existsSync } from 'fs';
 
 const __dirname   = path.dirname(fileURLToPath(import.meta.url));
@@ -127,15 +128,32 @@ router.get('/api/growth/locks', requireSecret, (_req, res) => {
   res.json(getActiveLocks());
 });
 
-// ── JOB TRIGGERS (Phase 1+ will fill these in) ───────────────────────────────
+// GET /api/growth/crawl-progress — live progress polled by dashboard every 2s
+router.get('/api/growth/crawl-progress', requireSecret, (_req, res) => {
+  res.json(crawlProgress);
+});
+
+// ── JOB TRIGGERS ─────────────────────────────────────────────────────────────
 
 // POST /api/growth/crawl
 router.post('/api/growth/crawl', requireSecret, async (req, res) => {
   if (!acquireLock('crawl')) {
-    return res.status(409).json({ error: 'Another job is already running. Check /api/growth/locks.' });
+    return res.status(409).json({ error: 'Crawl job already running.' });
   }
-  res.json({ message: 'Crawl job will be available in Phase 1' });
-  releaseLock('crawl');
+
+  const searchUrl = req.body?.searchUrl || DEFAULT_SEARCH_URL;
+  res.json({ message: 'Crawl started', searchUrl });
+
+  // Run async — response already sent
+  runCrawl({ searchUrl })
+    .then(result => {
+      const logs = readCrawlLogs();
+      logs.push(result);
+      saveCrawlLogs(logs);
+      glog.info('[Routes] Crawl complete, log saved');
+    })
+    .catch(e => glog.error('[Routes] Crawl failed', e))
+    .finally(() => releaseLock('crawl'));
 });
 
 // POST /api/growth/fetch

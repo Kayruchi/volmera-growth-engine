@@ -118,6 +118,20 @@ export async function getStatusCounts() {
 
 // ── WRITE ─────────────────────────────────────────────────────────────────────
 
+/** Append multiple rows in a single API call. rows = array of data objects. */
+export async function appendRows(rows) {
+  if (!rows || rows.length === 0) return;
+  const name = await getSheetName();
+  const client = getSheetsClient();
+  const values = rows.map(objToRow);
+  await client.spreadsheets.values.append({
+    spreadsheetId: SPREADSHEET_ID,
+    range: `${name}!A:N`,
+    valueInputOption: 'USER_ENTERED',
+    requestBody: { values },
+  });
+}
+
 /** Append a new row. data is a partial object — missing fields left blank. */
 export async function appendRow(data) {
   const name = await getSheetName();
