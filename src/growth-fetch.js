@@ -62,16 +62,19 @@ export async function runFetch({ limit = DEFAULT_FETCH_LIMIT } = {}) {
       try {
         const data = await scrapeProfile(page, row.profileUrl);
 
-        // Write Name/Title/Company + Fetched status immediately
+        // Write Name/Title/Company + Fetched status immediately.
+        // If isCurrentRole === false (confirmed past role, no current job), show "Not working"
+        // in the Company column. The real company name is kept in rowWithData for enrichment search.
+        const displayCompany = data.isCurrentRole === false ? 'Not working' : data.company;
         await batchUpdateRows([{
           rowIndex: row.rowIndex,
-          data: { name: data.name, title: data.title, company: data.company, status: 'Fetched' },
+          data: { name: data.name, title: data.title, company: displayCompany, status: 'Fetched' },
         }]);
         setProgress({ fetched: fetchProgress.fetched + 1 });
         glog.info(`[Fetch] Scraped — "${data.name}" | "${data.title}" | "${data.company}" | current: ${data.isCurrentRole} | date: "${data.roleDate}"`);
 
         // ── Fire background enrich — runs during next LinkedIn delay ──────────
-        // Merges scraped data into the row object so enrichProfile has name/company
+        // Merges scraped data into the row object so enrichProfile has real company name (not "Not working")
         const rowWithData = { ...row, name: data.name, title: data.title, company: data.company, isCurrentRole: data.isCurrentRole, roleDate: data.roleDate };
         const enrichTask = enrichProfile(rowWithData, () => {
           setProgress({ braved: fetchProgress.braved + 1 });

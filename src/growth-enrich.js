@@ -111,13 +111,16 @@ export async function runEnrich({ limit = DEFAULT_ENRICH_LIMIT } = {}) {
 // ── ENRICH ONE PROFILE ────────────────────────────────────────────────────────
 
 export async function enrichProfile(row, onBraveDone) {
-  const company = row.company || '';
   const name    = row.name    || '';
+  // "Not working" is written to the sheet when isCurrentRole===false — strip it here
+  // so Brave searches use the real last company name, not a display label.
+  const company = (row.company === 'Not working' ? '' : row.company) || '';
 
   // ── Round 1: 4 parallel searches ─────────────────────────────────────────
   // Person context + 3 company-specific angles to find concrete scale signals.
+  // Company searches are skipped if no company is known (between jobs / not loaded).
   const [personResults, generalResults, fleetResults, scaleResults] = await Promise.all([
-    braveSearch(`${name} ${company} Brasil`),
+    braveSearch(`${name} ${company} Brasil`.trim()),
     company ? braveSearch(`"${company}" logística operações Brasil`) : Promise.resolve(''),
     company ? braveSearch(`"${company}" frota caminhões instalações armazéns`) : Promise.resolve(''),
     company ? braveSearch(`"${company}" faturamento funcionários filiais receita`) : Promise.resolve(''),
@@ -133,7 +136,7 @@ export async function enrichProfile(row, onBraveDone) {
   if (!hasConcreteNumbers && company) {
     // Try news, annual reports, company website
     const [newsResults, siteResults] = await Promise.all([
-      braveSearch(`"${company}" site:linkedin.com OR notícia OR relatório anual operação logística Brasil`),
+      braveSearch(`"${company}" notícia OR relatório anual operação logística Brasil`),
       braveSearch(`"${company}" site oficial sobre empresa frota capacidade`),
     ]);
     companyResearch += '\n' + [newsResults, siteResults].filter(Boolean).join('\n');
