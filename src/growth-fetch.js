@@ -200,6 +200,27 @@ async function scrapeProfile(page, profileUrl) {
     main.scrollTop = 99999;
   });
   await page.waitForTimeout(2500);  // wait for Experience section to render
+
+  // Click any "Show all X experiences" / "Ver todas as X experiências" expand buttons.
+  // LinkedIn collapses long Experience sections — must click before reading body text.
+  try {
+    await page.evaluate(() => {
+      const buttons = Array.from(document.querySelectorAll('button, a'));
+      for (const el of buttons) {
+        const txt = (el.innerText || el.textContent || '').trim().toLowerCase();
+        if (
+          (txt.includes('show all') && (txt.includes('experience') || txt.includes('experiência') || txt.includes('position'))) ||
+          (txt.includes('ver tod') && txt.includes('experiên')) ||
+          (txt.includes('mostrar') && txt.includes('experiên'))
+        ) {
+          el.click();
+          break;
+        }
+      }
+    });
+    await page.waitForTimeout(1500);  // wait for expansion to render
+  } catch { /* ignore — button may not exist */ }
+
   // Second bottom pass — page may have grown taller after lazy-load rendered Experience
   await page.evaluate(() => {
     const main = document.querySelector('.scaffold-layout__main, main, #main') || document.documentElement;
@@ -308,7 +329,8 @@ async function scrapeProfile(page, profileUrl) {
       const entries = [];
       for (let j = 0; j < expLines.length; j++) {
         const l = expLines[j];
-        if (!l || l.length < 3 || YEAR_RE.test(l) || MONTH_RE.test(l)) continue;
+        // Skip blank/short lines, year/month date lines, and aggregate duration lines like "10 yrs 11 mos"
+        if (!l || l.length < 3 || YEAR_RE.test(l) || MONTH_RE.test(l) || DURATION_RE.test(l)) continue;
         // Skip location lines: "São Paulo, Brazil · On-site" / "Ribeirão Preto, São Paulo, Brazil"
         // Detected by: last segment after ' · ' is a work mode, OR line ends with a known work mode
         const lastSeg = l.includes(' · ') ? l.split(' · ').pop().trim() : l.trim();
@@ -322,7 +344,7 @@ async function scrapeProfile(page, profileUrl) {
         // vs standard layout: outer line is the job title itself.
         const outerIsCompanyHeader = !JOB_TITLE_RE.test(l);
 
-        for (let k = j + 1; k < Math.min(j + 8, expLines.length); k++) {
+        for (let k = j + 1; k < Math.min(j + 15, expLines.length); k++) {
           const next = expLines[k];
           if (!next) continue;
           if (YEAR_RE.test(next) || MONTH_RE.test(next)) {
@@ -354,13 +376,24 @@ async function scrapeProfile(page, profileUrl) {
         const resolvedTitle   = outerIsCompanyHeader ? entryTitle   : l;
         const resolvedCompany = outerIsCompanyHeader ? entryCompany : entryCompany;
 
-        if (dateFound) entries.push({ title: resolvedTitle, company: resolvedCompany, isPresent, date: entryDate });
+        // Push if we have a date, OR if we have at least a title/company (date was beyond lookahead).
+        // dateFound=false entries are treated as past roles (isPresent=false, isCurrentRole stays false).
+        if (dateFound || resolvedTitle || resolvedCompany) {
+          entries.push({ title: resolvedTitle, company: resolvedCompany, isPresent, date: entryDate });
+        }
       }
 
       const presentEntry = entries.find(e => e.isPresent);
+      const anyDateFound = entries.some(e => e.date);
       const current = presentEntry || entries[0];
-      // null = section not parsed; true = Present found; false = section parsed, no Present
-      isCurrentRole = entries.length > 0 ? !!presentEntry : null;
+      // null = section not found/parsed (no entries at all)
+      // true  = Present date confirmed
+      // false = section parsed with dates, no Present → confirmed past role
+      // null  = section parsed but NO date lines found at all → treat as unverified (null)
+      isCurrentRole = entries.length === 0 ? null
+                    : presentEntry          ? true
+                    : anyDateFound          ? false
+                    : null;  // entries exist but no dates — unverified (soft cap at 7, not hard cap at 5)
       if (current) { title = current.title; company = current.company; roleDate = current.date; }
     }
 
@@ -399,6 +432,105 @@ async function scrapeProfile(page, profileUrl) {
 
   if (!result.name) {
     throw new Error(`Name empty — LinkedIn body did not contain a recognisable name after the nav`);
+  }
+
+  // ── /details/experience/ fallback ─────────────────────────────────────────────
+  // LinkedIn hides the Experience section on the main profile page for non-connected
+  // profiles. When no Experience data was extracted (title empty, isCurrentRole null),
+  // navigate to the /details/experience/ sub-page which always renders the full section.
+  if (!result.title && result.isCurrentRole === null) {
+    try {
+      const username = profileUrl.split('/in/')[1]?.replace(/\/.*$/, '');
+      if (username) {
+        await page.goto(`https://www.linkedin.com/in/${username}/details/experience/`, {
+          waitUntil: 'domcontentloaded', timeout: 20000,
+        });
+        await page.waitForTimeout(3000);
+
+        const expData = await page.evaluate(() => {
+          const lines = (document.body.innerText || '')
+            .split('\n').map(s => s.trim()).filter(Boolean);
+
+          const YEAR_RE     = /\d{4}/;
+          const PRESENT_RE  = /\bpresent\b|\batual\b|\bo momento\b|\bpresente\b|\batualmente\b/i;
+          const MONTH_RE    = /^(Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec|Fev|Abr|Mai|Ago|Set|Out|Dez)/i;
+          const DURATION_RE = /\d+\s*(yr|mo|ano|mê|mes)/i;
+          const SECTION_END = /^(Education|Educação|Skills|Habilidades|Languages|Idiomas|Certifications|Certificações|Recomendações|Interests|Volunteer|Projects)$/i;
+          const EMPLOYMENT_TYPES = new Set([
+            'Full-time','Part-time','Contract','Freelance','Internship','Self-employed','Seasonal',
+            'Tempo integral','Meio período','Autônomo','Estágio','Temporário',
+          ]);
+          const WORK_MODES = new Set(['On-site','Remote','Hybrid','Presencial','Remoto','Híbrido','On site']);
+          const JOB_TITLE_RE = /\b(gerente|diretor|director|manager|coordenador|supervisor|analista|analyst|engenheiro|engineer|head of|\bvp\b|vice.?president|\bceo\b|\bcoo\b|\bcfo\b|\bcto\b|presidente|president|especialista|specialist|líder|lider|\blead\b|chefe|responsável|responsavel|\bcoord\b)\b/i;
+
+          const expIdx = lines.findIndex(l => l === 'Experience' || l === 'Experiência' || l === 'Cargo atual');
+          if (expIdx < 0) return null;
+
+          const expLines = [];
+          for (let i = expIdx + 1; i < lines.length; i++) {
+            if (SECTION_END.test(lines[i])) break;
+            expLines.push(lines[i]);
+          }
+
+          const entries = [];
+          for (let j = 0; j < expLines.length; j++) {
+            const l = expLines[j];
+            if (!l || l.length < 3 || YEAR_RE.test(l) || MONTH_RE.test(l) || DURATION_RE.test(l)) continue;
+            const lastSeg = l.includes(' · ') ? l.split(' · ').pop().trim() : l.trim();
+            if (WORK_MODES.has(lastSeg)) continue;
+            if (!l.includes(' · ') && l.includes(', ') && /\b(Brazil|Brasil|São Paulo|Rio de Janeiro|Minas Gerais|Paraná|Santa Catarina|Goiás|Mato Grosso|Bahia|Pernambuco|Ceará|Espírito Santo)\b/i.test(l)) continue;
+
+            let dateFound = false, isPresent = false, entryCompany = '', entryTitle = '', entryDate = '';
+            const outerIsCompanyHeader = !JOB_TITLE_RE.test(l);
+
+            for (let k = j + 1; k < Math.min(j + 15, expLines.length); k++) {
+              const next = expLines[k];
+              if (!next) continue;
+              if (YEAR_RE.test(next) || MONTH_RE.test(next)) {
+                dateFound = true;
+                isPresent = PRESENT_RE.test(next);
+                entryDate = next;
+                break;
+              }
+              if (DURATION_RE.test(next) || EMPLOYMENT_TYPES.has(next) || /^\d/.test(next)) continue;
+              const nextLastSeg = next.includes(' · ') ? next.split(' · ').pop().trim() : next.trim();
+              if (WORK_MODES.has(nextLastSeg)) continue;
+              const candidate = next.includes(' · ') ? next.split(' · ')[0].trim() : next;
+              if (!candidate || DURATION_RE.test(candidate) || /^\d/.test(candidate)) continue;
+              if (outerIsCompanyHeader) {
+                if (!entryTitle)   entryTitle   = candidate;
+                if (!entryCompany) entryCompany = l.includes(' · ') ? l.split(' · ')[0].trim() : l;
+              } else {
+                if (!entryCompany) entryCompany = candidate;
+              }
+            }
+
+            const resolvedTitle   = outerIsCompanyHeader ? entryTitle : l;
+            const resolvedCompany = outerIsCompanyHeader ? entryCompany : entryCompany;
+            if (dateFound || resolvedTitle || resolvedCompany) {
+              entries.push({ title: resolvedTitle, company: resolvedCompany, isPresent, date: entryDate });
+            }
+          }
+
+          if (entries.length === 0) return null;
+          const presentEntry = entries.find(e => e.isPresent);
+          const anyDateFound = entries.some(e => e.date);
+          const current = presentEntry || entries[0];
+          const isCurrentRole = presentEntry ? true : anyDateFound ? false : null;
+          return { title: current.title || '', company: current.company || '', isCurrentRole, roleDate: current.date || '' };
+        });
+
+        if (expData && (expData.title || expData.company)) {
+          result.title         = expData.title;
+          result.isCurrentRole = expData.isCurrentRole;
+          result.roleDate      = expData.roleDate;
+          // Only overwrite company if Experience gave us one — don't erase Contact info fallback
+          if (expData.company) result.company = expData.company;
+        }
+      }
+    } catch (e) {
+      glog.warn(`[Fetch] details/experience fallback failed for ${profileUrl}: ${e.message}`);
+    }
   }
 
   return result;
