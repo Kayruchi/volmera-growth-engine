@@ -65,11 +65,12 @@ export async function login(page) {
  */
 export async function launchBrowser() {
   const browser = await chromium.launch({
-    headless: true,
+    headless: false,  // LinkedIn detects headless mode and blocks profile page rendering
     args: [
       '--disable-blink-features=AutomationControlled',
       '--no-sandbox',
       '--disable-setuid-sandbox',
+      '--window-position=-10000,-10000',  // move off-screen — invisible but not headless
     ],
   });
   const context = await browser.newContext({
