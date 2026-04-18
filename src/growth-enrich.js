@@ -209,15 +209,21 @@ Any Brazilian company with significant physical goods movement. Target industrie
 - Small retail/service companies → Small
 - When truly no signals exist, use "Small–Medium (inferred)" — never output just "Unknown"
 
-**icpReason format:** Always return exactly 3 bullet points as a single string, each starting with "• ", separated by newline. Keep each bullet under 15 words. Cover: (1) role/seniority, (2) company/industry fit, (3) operation scale with real numbers if found. Write entirely in English — translate job titles and company types, never use Portuguese words in your output.
+**icpReason format:** Always return exactly 3 bullet points as a single string, each starting with "• ", separated by newline. Keep each bullet under 15 words. Cover: (1) role/seniority, (2) company/industry fit, (3) facility count and daily truck volume. Write entirely in English — translate job titles and company types, never use Portuguese words in your output.
 
 **Role currency:** You receive a person search and a company research block (multiple search angles). Cross-check the scraped title/company against both. If the person has left the company or the role is clearly from the past, lower the score by 3–4 points and flag it in bullet 1. Use the company research to assess operation scale independently.
 
-**opEstimate rules — CRITICAL:**
-- Always use concrete numbers from the search results when available. Example: "Large — 326 trucks confirmed, 14 facilities" or "Large — 2,000+ vehicles, national network confirmed".
-- Include actual revenue, employee count, or fleet size figures when found in the research.
-- Only use inferred generic ranges when absolutely NO concrete numbers exist in the research.
-- NEVER output a generic template like "Large (10+ facilities, 200+ trucks/day)" without company-specific evidence from the research — that is not an analysis, it is a guess.
+**opEstimate — THE ONLY TWO THINGS THAT MATTER:**
+opEstimate must answer exactly two questions:
+1. How many facilities (docks, terminals, warehouses, distribution centres) does this company operate in Brazil?
+2. What is the estimated daily truck volume across those facilities?
+
+Format: "[X] facilities, ~[Y] trucks/day" — always this format, nothing else.
+- Use confirmed numbers from research when found (e.g. "14 facilities, ~150 trucks/day confirmed")
+- If not directly stated, estimate from fleet size (a fleet of 326 trucks → ~100-200 trucks/day across facilities), headcount, or company type
+- If truly nothing found, estimate from industry type (e.g. "~3-5 facilities, ~50 trucks/day — regional 3PL inferred")
+- NEVER include revenue, CNPJ count, geographic coverage, LinkedIn followers, or any other info in opEstimate
+- NEVER leave opEstimate vague — always give specific numbers even if estimated
 
 You must respond with ONLY valid JSON, no explanation, no markdown fences.`;
 
@@ -254,15 +260,15 @@ ${companySearchResults || '(no results)'}
 Score this person's ICP fit for Volmera. Instructions:
 1. Role: assess seniority — decision maker, influencer, or contributor?
 2. Currency: is the scraped role still current? Check person search for evidence.
-3. Scale: extract CONCRETE numbers from company research — truck count, facility count, employee count, revenue. Use those real numbers in opEstimate. If nothing found, infer from industry/company type.
+3. Scale: from the company research, find how many physical facilities (docks, terminals, warehouses, DCs) this company runs in Brazil AND what the daily truck volume is. These are the ONLY two numbers needed for opEstimate.
 4. Industry: logistics, agribusiness, manufacturing, 3PL, cold chain, distribution?
 5. Product fit: which Volmera product matches this company's core pain?
 
 Respond with this exact JSON:
 {
   "relevantProds": "YMS / Freight Marketplace / Pallet Marketplace — or a combination",
-  "opEstimate": "Use real numbers found in research (e.g. 'Large — 326 trucks, 14 facilities confirmed'). Only use generic range if no concrete data found.",
-  "icpReason": "• Role: ...\\n• Industry: ...\\n• Scale: (include real numbers if found)",
+  "opEstimate": "X facilities, ~Y trucks/day (source: confirmed/estimated/inferred)",
+  "icpReason": "• Role: ...\\n• Industry: ...\\n• Scale: X facilities, ~Y trucks/day",
   "icpScore": 7
 }`;
 
