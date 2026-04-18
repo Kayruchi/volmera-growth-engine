@@ -252,6 +252,9 @@ async function scrapeProfile(page, profileUrl) {
     // or a company group header (grouped layout like "DHL Supply Chain → title below").
     // Do NOT add industry words (logistics, supply chain, operações) — they appear in company names.
     const JOB_TITLE_RE = /\b(gerente|diretor|director|manager|coordenador|supervisor|analista|analyst|engenheiro|engineer|head of|\bvp\b|vice.?president|\bceo\b|\bcoo\b|\bcfo\b|\bcto\b|presidente|president|especialista|specialist|líder|lider|\blead\b|chefe|responsável|responsavel|\bcoord\b)\b/i;
+    // Work mode labels LinkedIn appends to location lines: "São Paulo, Brazil · On-site"
+    // These must be filtered out — they are NOT job titles or company names.
+    const WORK_MODES = new Set(['On-site','Remote','Hybrid','Presencial','Remoto','Híbrido','On site']);
 
     let title = '', company = '', isCurrentRole = null, roleDate = '';
     // isCurrentRole: null = Experience section not found/parsed
@@ -273,6 +276,12 @@ async function scrapeProfile(page, profileUrl) {
       for (let j = 0; j < expLines.length; j++) {
         const l = expLines[j];
         if (!l || l.length < 3 || YEAR_RE.test(l) || MONTH_RE.test(l)) continue;
+        // Skip location lines: "São Paulo, Brazil · On-site" / "Ribeirão Preto, São Paulo, Brazil"
+        // Detected by: last segment after ' · ' is a work mode, OR line ends with a known work mode
+        const lastSeg = l.includes(' · ') ? l.split(' · ').pop().trim() : l.trim();
+        if (WORK_MODES.has(lastSeg)) continue;
+        // Also skip lines that look like "City, State, Country" with no job/company signal
+        if (!l.includes(' · ') && l.includes(', ') && /\b(Brazil|Brasil|São Paulo|Rio de Janeiro|Minas Gerais|Paraná|Santa Catarina|Goiás|Mato Grosso|Bahia|Pernambuco|Ceará|Espírito Santo)\b/i.test(l)) continue;
 
         let dateFound = false, isPresent = false, entryCompany = '', entryTitle = '', entryDate = '';
 
@@ -289,8 +298,10 @@ async function scrapeProfile(page, profileUrl) {
             entryDate = next; // e.g. "Jan 2020 - Present" or "Mar 2018 - Dec 2024"
             break;
           }
-          // Skip duration strings, employment type labels, and digit-only artifacts in both layouts
+          // Skip duration strings, employment type labels, work modes, and digit-only artifacts
           if (DURATION_RE.test(next) || EMPLOYMENT_TYPES.has(next) || /^\d/.test(next)) continue;
+          const nextLastSeg = next.includes(' · ') ? next.split(' · ').pop().trim() : next.trim();
+          if (WORK_MODES.has(nextLastSeg)) continue;
 
           const candidate = next.includes(' · ') ? next.split(' · ')[0].trim() : next;
           if (!candidate || DURATION_RE.test(candidate) || /^\d/.test(candidate)) continue;

@@ -111,19 +111,37 @@ export async function runEnrich({ limit = DEFAULT_ENRICH_LIMIT } = {}) {
 // ── ENRICH ONE PROFILE ────────────────────────────────────────────────────────
 
 export async function enrichProfile(row, onBraveDone) {
-  // Two Brave searches run in parallel:
-  //   1. Person search — name + company: confirms role, finds LinkedIn activity, news mentions
-  //   2. Company search — company + operations keywords: assesses operation scale, fleet size, facilities
-  const personQuery  = [row.name, row.company, 'Brasil'].filter(Boolean).join(' ');
-  const companyQuery = [row.company, 'operações', 'logística', 'frota', 'Brasil'].filter(Boolean).join(' ');
+  const company = row.company || '';
+  const name    = row.name    || '';
 
-  const [personResults, companyResults] = await Promise.all([
-    braveSearch(personQuery),
-    row.company ? braveSearch(companyQuery) : Promise.resolve('(no company — skipped)'),
+  // ── Round 1: 4 parallel searches ─────────────────────────────────────────
+  // Person context + 3 company-specific angles to find concrete scale signals.
+  const [personResults, generalResults, fleetResults, scaleResults] = await Promise.all([
+    braveSearch(`${name} ${company} Brasil`),
+    company ? braveSearch(`"${company}" logística operações Brasil`) : Promise.resolve(''),
+    company ? braveSearch(`"${company}" frota caminhões instalações armazéns`) : Promise.resolve(''),
+    company ? braveSearch(`"${company}" faturamento funcionários filiais receita`) : Promise.resolve(''),
   ]);
 
-  onBraveDone?.();  // fires after both Brave searches complete — used by Batch 2 pipeline for live tracking
-  return await claudeScore(row, personResults, companyResults);
+  // Combine company research results
+  let companyResearch = [generalResults, fleetResults, scaleResults].filter(Boolean).join('\n').slice(0, 4000);
+
+  // ── Round 2: targeted follow-up if Round 1 has no concrete scale numbers ──
+  // Looks for any numeric signal: truck count, facility count, revenue figure, headcount.
+  const hasConcreteNumbers = /\b\d{2,}[\s+]*(caminhões|trucks|veículos|vehicles|instalações|facilities|filiais|armazéns|funcionários|employees|milhões|bilhões|million|billion)\b/i.test(companyResearch);
+
+  if (!hasConcreteNumbers && company) {
+    // Try news, annual reports, company website
+    const [newsResults, siteResults] = await Promise.all([
+      braveSearch(`"${company}" site:linkedin.com OR notícia OR relatório anual operação logística Brasil`),
+      braveSearch(`"${company}" site oficial sobre empresa frota capacidade`),
+    ]);
+    companyResearch += '\n' + [newsResults, siteResults].filter(Boolean).join('\n');
+    companyResearch = companyResearch.slice(0, 5000);
+  }
+
+  onBraveDone?.();  // fires after all Brave searches — used by Batch 2 pipeline for live counter
+  return await claudeScore(row, personResults, companyResearch);
 }
 
 // ── BRAVE SEARCH ──────────────────────────────────────────────────────────────
@@ -188,9 +206,15 @@ Any Brazilian company with significant physical goods movement. Target industrie
 - Small retail/service companies → Small
 - When truly no signals exist, use "Small–Medium (inferred)" — never output just "Unknown"
 
-**icpReason format:** Always return exactly 3 bullet points as a single string, each starting with "• ", separated by newline. Keep each bullet under 15 words. Cover: (1) role/seniority, (2) company/industry fit, (3) operation scale. Write entirely in English — translate job titles and company types, never use Portuguese words in your output.
+**icpReason format:** Always return exactly 3 bullet points as a single string, each starting with "• ", separated by newline. Keep each bullet under 15 words. Cover: (1) role/seniority, (2) company/industry fit, (3) operation scale with real numbers if found. Write entirely in English — translate job titles and company types, never use Portuguese words in your output.
 
-**Role currency:** You receive TWO search result sets — one for the person, one for the company. Cross-check the scraped title/company against both. If the person has left the company or the role is clearly from the past, lower the score by 3–4 points and flag it in bullet 1. Use the company search to assess operation scale independently of the person search.
+**Role currency:** You receive a person search and a company research block (multiple search angles). Cross-check the scraped title/company against both. If the person has left the company or the role is clearly from the past, lower the score by 3–4 points and flag it in bullet 1. Use the company research to assess operation scale independently.
+
+**opEstimate rules — CRITICAL:**
+- Always use concrete numbers from the search results when available. Example: "Large — 326 trucks confirmed, 14 facilities" or "Large — 2,000+ vehicles, national network confirmed".
+- Include actual revenue, employee count, or fleet size figures when found in the research.
+- Only use inferred generic ranges when absolutely NO concrete numbers exist in the research.
+- NEVER output a generic template like "Large (10+ facilities, 200+ trucks/day)" without company-specific evidence from the research — that is not an analysis, it is a guess.
 
 You must respond with ONLY valid JSON, no explanation, no markdown fences.`;
 
@@ -218,24 +242,24 @@ async function claudeScore(row, personSearchResults, companySearchResults) {
 - LinkedIn: ${row.profileUrl}
 ${roleDateLine}
 
---- SEARCH RESULTS: PERSON ("${row.name} ${row.company}") ---
+--- PERSON SEARCH ("${row.name} ${row.company}") ---
 ${personSearchResults || '(no results)'}
 
---- SEARCH RESULTS: COMPANY ("${row.company} operações logística Brasil") ---
+--- COMPANY RESEARCH ("${row.company}" — fleet, facilities, financials, news) ---
 ${companySearchResults || '(no results)'}
 
-Score this person's ICP fit for Volmera. Synthesize BOTH search result sets. Consider:
-1. Their seniority level (decision maker / influencer / contributor)
-2. Whether the scraped role is still current (check person search results)
-3. The company's actual operation scale — use company search to find number of facilities, fleet size, revenue, employee count
-4. Industry fit (logistics, agribusiness, manufacturing, 3PL, cold chain, distribution)
-5. Which Volmera product fits best given company type and scale
+Score this person's ICP fit for Volmera. Instructions:
+1. Role: assess seniority — decision maker, influencer, or contributor?
+2. Currency: is the scraped role still current? Check person search for evidence.
+3. Scale: extract CONCRETE numbers from company research — truck count, facility count, employee count, revenue. Use those real numbers in opEstimate. If nothing found, infer from industry/company type.
+4. Industry: logistics, agribusiness, manufacturing, 3PL, cold chain, distribution?
+5. Product fit: which Volmera product matches this company's core pain?
 
 Respond with this exact JSON:
 {
-  "relevantProds": "YMS / Freight Marketplace / Pallet Marketplace — or a combination e.g. YMS, Freight Marketplace",
-  "opEstimate": "Large (10+ facilities, 200+ trucks/day) OR Medium (3-10 facilities, 40-200 trucks/day) OR Small (<3 facilities, <40 trucks/day) — never Unknown, always infer from all available signals",
-  "icpReason": "• Role: ...\\n• Industry: ...\\n• Scale: ...",
+  "relevantProds": "YMS / Freight Marketplace / Pallet Marketplace — or a combination",
+  "opEstimate": "Use real numbers found in research (e.g. 'Large — 326 trucks, 14 facilities confirmed'). Only use generic range if no concrete data found.",
+  "icpReason": "• Role: ...\\n• Industry: ...\\n• Scale: (include real numbers if found)",
   "icpScore": 7
 }`;
 
