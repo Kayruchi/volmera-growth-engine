@@ -7,7 +7,10 @@
 //  G(6): ICP Reason       H(7): ICP Score      I(8): Request Sent
 //  J(9): Request Accepted K(10): Last Message Sent
 //  L(11): Marketing Messaging EN   M(12): Follow up Message EN
-//  N(13): Status
+//  N(13): Status          O(14): Last Pulse
+//
+// Changes tab gid: 48533851
+//  A: Profile URL  B: Name  C: Old Title  D: Old Company  E: Detected On  F: Congrats Sent
 
 import { google } from 'googleapis';
 import { glog } from './growth-logger.js';
@@ -15,6 +18,7 @@ import { glog } from './growth-logger.js';
 const SPREADSHEET_ID = process.env.GROWTH_SHEET_ID || '1tbGNSHsUZihsR4vciqV5dXlIf4Iy4nzlZS2-8DkRBIg';
 const GROWTH_GID     = '1961568046';
 const BLACKLIST_TAB  = 'Blacklist';
+const CHANGES_TAB    = 'Changes';
 
 // Column indices (0-based)
 export const COL = {
@@ -32,6 +36,7 @@ export const COL = {
   MARKETING_MSG:  11,
   FOLLOWUP_MSG:   12,
   STATUS:         13,
+  LAST_PULSE:     14,
 };
 
 let _sheets = null;
@@ -76,7 +81,7 @@ export async function getAllRows() {
   const client = getSheetsClient();
   const res = await client.spreadsheets.values.get({
     spreadsheetId: SPREADSHEET_ID,
-    range: `${name}!A:N`,
+    range: `${name}!A:O`,
   });
   const rows = res.data.values || [];
   // Skip header row (index 0 = row 1)
@@ -245,11 +250,12 @@ function rowToObj(row, rowIndex) {
     marketingMsg:  row[COL.MARKETING_MSG]  || '',
     followupMsg:   row[COL.FOLLOWUP_MSG]   || '',
     status:        row[COL.STATUS]         || '',
+    lastPulse:     row[COL.LAST_PULSE]     || '',
   };
 }
 
 function objToRow(data) {
-  const row = new Array(14).fill('');
+  const row = new Array(15).fill('');
   const map = {
     profileUrl:    COL.PROFILE_URL,
     name:          COL.NAME,
@@ -265,6 +271,7 @@ function objToRow(data) {
     marketingMsg:  COL.MARKETING_MSG,
     followupMsg:   COL.FOLLOWUP_MSG,
     status:        COL.STATUS,
+    lastPulse:     COL.LAST_PULSE,
   };
   for (const [field, colIdx] of Object.entries(map)) {
     if (data[field] !== undefined) row[colIdx] = String(data[field]);
@@ -288,5 +295,21 @@ const _colKeyToField = {
   MARKETING_MSG:  'marketingMsg',
   FOLLOWUP_MSG:   'followupMsg',
   STATUS:         'status',
+  LAST_PULSE:     'lastPulse',
 };
 function colKeyToField(key) { return _colKeyToField[key] || key.toLowerCase(); }
+
+// ── CHANGES TAB ───────────────────────────────────────────────────────────────
+// Columns: A=Profile URL, B=Name, C=Old Title, D=Old Company, E=Detected On, F=Congrats Sent
+
+/** Append a detected job change to the Changes tab. */
+export async function appendChange({ profileUrl, name, oldTitle, oldCompany }) {
+  const client = getSheetsClient();
+  const detectedOn = new Date().toISOString().slice(0, 10);
+  await client.spreadsheets.values.append({
+    spreadsheetId: SPREADSHEET_ID,
+    range: `${CHANGES_TAB}!A:F`,
+    valueInputOption: 'USER_ENTERED',
+    requestBody: { values: [[profileUrl, name, oldTitle, oldCompany, detectedOn, '']] },
+  });
+}

@@ -12,6 +12,8 @@ import { acquireLock, releaseLock, getActiveLocks, isAnyGrowthJobRunning } from 
 import { getStatusCounts } from './growth-sheets.js';
 import { runCrawl, crawlProgress, DEFAULT_SEARCH_URL } from './growth-crawl.js';
 import { runFetch, fetchProgress, DEFAULT_FETCH_LIMIT } from './growth-fetch.js';
+import { runEnrich, enrichProgress, DEFAULT_ENRICH_LIMIT } from './growth-enrich.js';
+import { runPulse, pulseProgress, DEFAULT_PULSE_LIMIT } from './growth-pulse.js';
 import { readFileSync, writeFileSync, existsSync } from 'fs';
 
 const __dirname   = path.dirname(fileURLToPath(import.meta.url));
@@ -139,6 +141,11 @@ router.get('/api/growth/fetch-progress', requireSecret, (_req, res) => {
   res.json(fetchProgress);
 });
 
+// GET /api/growth/enrich-progress
+router.get('/api/growth/enrich-progress', requireSecret, (_req, res) => {
+  res.json(enrichProgress);
+});
+
 // ── JOB TRIGGERS ─────────────────────────────────────────────────────────────
 
 // POST /api/growth/crawl
@@ -162,7 +169,7 @@ router.post('/api/growth/crawl', requireSecret, async (req, res) => {
     .finally(() => releaseLock('crawl'));
 });
 
-// POST /api/growth/fetch
+// POST /api/growth/fetch — Job 2: Playwright visits each Scraped profile, extracts Name/Title/Company
 router.post('/api/growth/fetch', requireSecret, async (req, res) => {
   if (!acquireLock('fetch')) {
     return res.status(409).json({ error: 'Fetch job already running.' });
@@ -182,22 +189,49 @@ router.post('/api/growth/fetch', requireSecret, async (req, res) => {
     .finally(() => releaseLock('fetch'));
 });
 
-// POST /api/growth/enrich
-router.post('/api/growth/enrich', requireSecret, async (_req, res) => {
+// POST /api/growth/enrich — Job 3: Brave Search + Claude ICP scoring on Fetched rows
+router.post('/api/growth/enrich', requireSecret, async (req, res) => {
   if (!acquireLock('enrich')) {
-    return res.status(409).json({ error: 'Another job is already running. Check /api/growth/locks.' });
+    return res.status(409).json({ error: 'Enrich job already running.' });
   }
-  res.json({ message: 'Enrich job will be available in Phase 3' });
-  releaseLock('enrich');
+
+  const limit = Number(req.body?.limit) || DEFAULT_ENRICH_LIMIT;
+  res.json({ message: 'Enrich started', limit });
+
+  runEnrich({ limit })
+    .then(result => {
+      const state = readJobState();
+      state.lastEnrich = result;
+      saveJobState(state);
+      glog.info('[Routes] Enrich complete, state saved');
+    })
+    .catch(e => glog.error('[Routes] Enrich failed', e))
+    .finally(() => releaseLock('enrich'));
 });
 
-// POST /api/growth/pulse
-router.post('/api/growth/pulse', requireSecret, async (_req, res) => {
+// GET /api/growth/pulse-progress
+router.get('/api/growth/pulse-progress', requireSecret, (_req, res) => {
+  res.json(pulseProgress);
+});
+
+// POST /api/growth/pulse — Job 4: Playwright checks for job changes, re-enriches if changed
+router.post('/api/growth/pulse', requireSecret, async (req, res) => {
   if (!acquireLock('pulse')) {
-    return res.status(409).json({ error: 'Another job is already running. Check /api/growth/locks.' });
+    return res.status(409).json({ error: 'Pulse job already running.' });
   }
-  res.json({ message: 'Pulse job will be available in Phase 4' });
-  releaseLock('pulse');
+
+  const limit = Number(req.body?.limit) || DEFAULT_PULSE_LIMIT;
+  res.json({ message: 'Pulse started', limit });
+
+  runPulse({ limit })
+    .then(result => {
+      const state = readJobState();
+      state.lastPulse = result;
+      saveJobState(state);
+      glog.info('[Routes] Pulse complete, state saved');
+    })
+    .catch(e => glog.error('[Routes] Pulse failed', e))
+    .finally(() => releaseLock('pulse'));
 });
 
 // POST /api/growth/invite

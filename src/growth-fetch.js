@@ -151,7 +151,7 @@ export async function runFetch({ limit = DEFAULT_FETCH_LIMIT } = {}) {
 
 // ── PROFILE SCRAPER ───────────────────────────────────────────────────────────
 
-async function scrapeProfile(page, profileUrl) {
+export async function scrapeProfile(page, profileUrl) {
   await page.goto(profileUrl, { waitUntil: 'domcontentloaded', timeout: 30000 });
   await page.waitForTimeout(4000); // fixed wait — no waitFor, no polling
 
