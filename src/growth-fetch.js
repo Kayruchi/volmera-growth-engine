@@ -167,8 +167,10 @@ async function scrapeProfile(page, profileUrl) {
   }
 
 
-  // Scroll in 3 stages. LinkedIn may use a container div instead of window scroll,
-  // so we scroll both the window and the main content container.
+  // Scroll in 4 stages. LinkedIn uses IntersectionObserver to lazy-load Experience section.
+  // We scroll both the window and the main container to cover all LinkedIn layouts.
+  // The final pass is done TWICE — first pass triggers the lazy load, second pass
+  // scrolls any newly rendered content (longer profiles push Experience further down).
   await page.evaluate(() => {
     const main = document.querySelector('.scaffold-layout__main, main, #main') || document.documentElement;
     window.scrollTo(0, 900);
@@ -186,7 +188,14 @@ async function scrapeProfile(page, profileUrl) {
     window.scrollTo(0, 99999);
     main.scrollTop = 99999;
   });
-  await page.waitForTimeout(3000);
+  await page.waitForTimeout(2500);  // wait for Experience section to render
+  // Second bottom pass — page may have grown taller after lazy-load rendered Experience
+  await page.evaluate(() => {
+    const main = document.querySelector('.scaffold-layout__main, main, #main') || document.documentElement;
+    window.scrollTo(0, 99999);
+    main.scrollTop = 99999;
+  });
+  await page.waitForTimeout(2000);
 
   const result = await page.evaluate(() => {
     const allLines = (document.body.innerText || '')
