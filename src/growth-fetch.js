@@ -68,11 +68,11 @@ export async function runFetch({ limit = DEFAULT_FETCH_LIMIT } = {}) {
           data: { name: data.name, title: data.title, company: data.company, status: 'Fetched' },
         }]);
         setProgress({ fetched: fetchProgress.fetched + 1 });
-        glog.info(`[Fetch] Scraped — "${data.name}" | "${data.title}" | "${data.company}" | loc: "${data.location}"`);
+        glog.info(`[Fetch] Scraped — "${data.name}" | "${data.title}" | "${data.company}" | current: ${data.isCurrentRole} | date: "${data.roleDate}"`);
 
         // ── Fire background enrich — runs during next LinkedIn delay ──────────
         // Merges scraped data into the row object so enrichProfile has name/company
-        const rowWithData = { ...row, name: data.name, title: data.title, company: data.company, isCurrentRole: data.isCurrentRole };
+        const rowWithData = { ...row, name: data.name, title: data.title, company: data.company, isCurrentRole: data.isCurrentRole, roleDate: data.roleDate };
         const enrichTask = enrichProfile(rowWithData, () => {
           setProgress({ braved: fetchProgress.braved + 1 });
         })
@@ -225,7 +225,7 @@ async function scrapeProfile(page, profileUrl) {
     const MONTH_RE   = /^(Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec|Fev|Abr|Mai|Ago|Set|Out|Dez)/i;
     const SECTION_END = /^(Education|Educação|Skills|Habilidades|Languages|Idiomas|Certifications|Certificações|Recomendações|Interests|Volunteer|Projects)$/i;
 
-    let title = '', company = '', isCurrentRole = true;
+    let title = '', company = '', isCurrentRole = true, roleDate = '';
 
     const expIdx = allLines.findIndex(l =>
       l === 'Experience' || l === 'Experiência' || l === 'Cargo atual'
@@ -243,13 +243,14 @@ async function scrapeProfile(page, profileUrl) {
         const l = expLines[j];
         if (!l || l.length < 3 || YEAR_RE.test(l) || MONTH_RE.test(l)) continue;
 
-        let dateFound = false, isPresent = false, entryCompany = '';
+        let dateFound = false, isPresent = false, entryCompany = '', entryDate = '';
         for (let k = j + 1; k < Math.min(j + 6, expLines.length); k++) {
           const next = expLines[k];
           if (!next) continue;
           if (YEAR_RE.test(next) || MONTH_RE.test(next)) {
             dateFound = true;
             isPresent = PRESENT_RE.test(next);
+            entryDate = next; // e.g. "Jan 2020 - Present" or "Mar 2018 - Dec 2024"
             break;
           }
           if (!entryCompany && next.length > 1) {
@@ -257,13 +258,13 @@ async function scrapeProfile(page, profileUrl) {
           }
         }
 
-        if (dateFound) entries.push({ title: l, company: entryCompany, isPresent });
+        if (dateFound) entries.push({ title: l, company: entryCompany, isPresent, date: entryDate });
       }
 
       const presentEntry = entries.find(e => e.isPresent);
       const current = presentEntry || entries[0];
       isCurrentRole = !!presentEntry;
-      if (current) { title = current.title; company = current.company; }
+      if (current) { title = current.title; company = current.company; roleDate = current.date; }
     }
 
     // ── Fallback for title — LinkedIn headline sits right after the name in the intro card
@@ -291,7 +292,7 @@ async function scrapeProfile(page, profileUrl) {
       }
     }
 
-    return { name, title, company, location, isCurrentRole };
+    return { name, title, company, location, isCurrentRole, roleDate };
   });
 
   if (!result.name) {

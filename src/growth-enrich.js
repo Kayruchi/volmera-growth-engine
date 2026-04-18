@@ -184,16 +184,23 @@ Companies with significant physical goods movement in Brazil — especially agri
 You must respond with ONLY valid JSON, no explanation, no markdown fences.`;
 
 async function claudeScore(row, searchResults) {
-  const roleWarning = row.isCurrentRole === false
-    ? '⚠️ STALE ROLE WARNING: No "Present/Current" date was found in their LinkedIn Experience section. This title may be a past role. Verify against search results — if they have moved on, reduce score by 3–4 points and note it in icpReason bullet 1.'
-    : '';
+  // If no "Present" date was found in LinkedIn Experience, this is a past role.
+  // We hard-cap the score at 5 after Claude returns — but also tell Claude upfront
+  // so the reason text accurately reflects the stale status.
+  const isPastRole = row.isCurrentRole === false;
+  const displayTitle = isPastRole
+    ? `${row.title} [FORMER ROLE — left company, no current position found]`
+    : (row.title || '(unknown)');
+  const roleDateLine = isPastRole
+    ? `- Role date: ${row.roleDate || '(no Present date on LinkedIn)'} ← person has left this role`
+    : `- Role date: ${row.roleDate || 'Present'}`;
 
   const userMsg = `Profile to score:
 - Name: ${row.name || '(unknown)'}
-- Title: ${row.title || '(unknown)'}
+- Title: ${displayTitle}
 - Company: ${row.company || '(unknown)'}
 - LinkedIn: ${row.profileUrl}
-${roleWarning ? '\n' + roleWarning : ''}
+${roleDateLine}
 Brave Search results for "${row.name} ${row.company}":
 ${searchResults || '(no results — use title and company to infer)'}
 
@@ -238,11 +245,16 @@ Respond with this exact JSON:
 
   const parsed = JSON.parse(text);
 
+  // Hard cap: if LinkedIn showed no "Present" date, this is a past role.
+  // No matter what Claude scores, cap at 5 — can't sell to someone with no current job.
+  const rawScore = Math.min(10, Math.max(1, Number(parsed.icpScore) || 1));
+  const icpScore = isPastRole ? Math.min(rawScore, 5) : rawScore;
+
   return {
     relevantProds: String(parsed.relevantProds || '').slice(0, 200),
     opEstimate:    String(parsed.opEstimate    || 'Unknown').slice(0, 100),
     icpReason:     String(parsed.icpReason     || '').slice(0, 600),
-    icpScore:      Math.min(10, Math.max(1, Number(parsed.icpScore) || 1)),
+    icpScore,
   };
 }
 
