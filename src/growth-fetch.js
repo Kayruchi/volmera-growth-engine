@@ -247,6 +247,11 @@ async function scrapeProfile(page, profileUrl) {
       'Full-time','Part-time','Contract','Freelance','Internship','Self-employed','Seasonal',
       'Tempo integral','Meio período','Autônomo','Estágio','Temporário',
     ]);
+    // Words that only appear in job titles/seniority — NOT in company names.
+    // Used to detect whether an Experience outer line is a job title (standard layout)
+    // or a company group header (grouped layout like "DHL Supply Chain → title below").
+    // Do NOT add industry words (logistics, supply chain, operações) — they appear in company names.
+    const JOB_TITLE_RE = /\b(gerente|diretor|director|manager|coordenador|supervisor|analista|analyst|engenheiro|engineer|head of|\bvp\b|vice.?president|\bceo\b|\bcoo\b|\bcfo\b|\bcto\b|presidente|president|especialista|specialist|líder|lider|\blead\b|chefe|responsável|responsavel|\bcoord\b)\b/i;
 
     let title = '', company = '', isCurrentRole = null, roleDate = '';
     // isCurrentRole: null = Experience section not found/parsed
@@ -269,8 +274,13 @@ async function scrapeProfile(page, profileUrl) {
         const l = expLines[j];
         if (!l || l.length < 3 || YEAR_RE.test(l) || MONTH_RE.test(l)) continue;
 
-        let dateFound = false, isPresent = false, entryCompany = '', entryDate = '';
-        for (let k = j + 1; k < Math.min(j + 6, expLines.length); k++) {
+        let dateFound = false, isPresent = false, entryCompany = '', entryTitle = '', entryDate = '';
+
+        // Detect LinkedIn grouped layout: outer line is a company group header (no job title words)
+        // vs standard layout: outer line is the job title itself.
+        const outerIsCompanyHeader = !JOB_TITLE_RE.test(l);
+
+        for (let k = j + 1; k < Math.min(j + 8, expLines.length); k++) {
           const next = expLines[k];
           if (!next) continue;
           if (YEAR_RE.test(next) || MONTH_RE.test(next)) {
@@ -279,20 +289,28 @@ async function scrapeProfile(page, profileUrl) {
             entryDate = next; // e.g. "Jan 2020 - Present" or "Mar 2018 - Dec 2024"
             break;
           }
-          // Skip duration strings, employment type labels, and digit-only artifacts
-          if (!entryCompany && next.length > 1
-              && !DURATION_RE.test(next)
-              && !EMPLOYMENT_TYPES.has(next)
-              && !/^\d/.test(next)) {
-            const candidate = next.includes(' · ') ? next.split(' · ')[0].trim() : next;
-            // After splitting on ' · ', re-check that the candidate isn't a duration/digit
-            if (candidate && !DURATION_RE.test(candidate) && !/^\d/.test(candidate)) {
-              entryCompany = candidate;
-            }
+          // Skip duration strings, employment type labels, and digit-only artifacts in both layouts
+          if (DURATION_RE.test(next) || EMPLOYMENT_TYPES.has(next) || /^\d/.test(next)) continue;
+
+          const candidate = next.includes(' · ') ? next.split(' · ')[0].trim() : next;
+          if (!candidate || DURATION_RE.test(candidate) || /^\d/.test(candidate)) continue;
+
+          if (outerIsCompanyHeader) {
+            // Grouped layout — outer = company, first valid inner = actual job title
+            if (!entryTitle)   entryTitle   = candidate;
+            if (!entryCompany) entryCompany = l.includes(' · ') ? l.split(' · ')[0].trim() : l;
+          } else {
+            // Standard layout — outer = title (l), first valid inner = company
+            if (!entryCompany) entryCompany = candidate;
           }
         }
 
-        if (dateFound) entries.push({ title: l, company: entryCompany, isPresent, date: entryDate });
+        // In grouped layout with no title found (company header → Full-time → date),
+        // leave title blank — better than storing the company name as title.
+        const resolvedTitle   = outerIsCompanyHeader ? entryTitle   : l;
+        const resolvedCompany = outerIsCompanyHeader ? entryCompany : entryCompany;
+
+        if (dateFound) entries.push({ title: resolvedTitle, company: resolvedCompany, isPresent, date: entryDate });
       }
 
       const presentEntry = entries.find(e => e.isPresent);
@@ -312,7 +330,8 @@ async function scrapeProfile(page, profileUrl) {
       if (contactIdx >= 0) {
         for (let i = contactIdx + 1; i < Math.min(contactIdx + 5, allLines.length); i++) {
           const l = allLines[i];
-          if (l && l.length > 1 && !l.match(/^\d/) && l !== '·' && !l.startsWith('·') && l !== 'See all') {
+          if (l && l.length > 1 && !l.match(/^\d/) && l !== '·' && !l.startsWith('·') && l !== 'See all'
+              && !EMPLOYMENT_TYPES.has(l) && !DURATION_RE.test(l)) {
             company = l;
             break;
           }
