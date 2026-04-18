@@ -213,17 +213,21 @@ Any Brazilian company with significant physical goods movement. Target industrie
 
 **Role currency:** You receive a person search and a company research block (multiple search angles). Cross-check the scraped title/company against both. If the person has left the company or the role is clearly from the past, lower the score by 3–4 points and flag it in bullet 1. Use the company research to assess operation scale independently.
 
-**opEstimate — THE ONLY TWO THINGS THAT MATTER:**
-opEstimate must answer exactly two questions:
-1. How many facilities (docks, terminals, warehouses, distribution centres) does this company operate in Brazil?
+**opEstimate — STRICT FORMAT, NO EXCEPTIONS:**
+Two numbers only — nothing else allowed in this field:
+1. How many facilities (docks, terminals, warehouses, distribution centres) in Brazil?
 2. What is the estimated daily truck volume across those facilities?
 
-Format: "[X] facilities, ~[Y] trucks/day" — always this format, nothing else.
-- Use confirmed numbers from research when found (e.g. "14 facilities, ~150 trucks/day confirmed")
-- If not directly stated, estimate from fleet size (a fleet of 326 trucks → ~100-200 trucks/day across facilities), headcount, or company type
-- If truly nothing found, estimate from industry type (e.g. "~3-5 facilities, ~50 trucks/day — regional 3PL inferred")
-- NEVER include revenue, CNPJ count, geographic coverage, LinkedIn followers, or any other info in opEstimate
-- NEVER leave opEstimate vague — always give specific numbers even if estimated
+Output format — exactly this, no deviations:
+- Confirmed data:  "196 facilities, ~500 trucks/day"
+- Estimated data:  "~5 facilities, ~80 trucks/day"
+- Inferred data:   "~3 facilities, ~40 trucks/day"
+
+FORBIDDEN in opEstimate (put these in icpReason bullet 3 instead):
+- Source citations: no "(source: confirmed)", no "— 96 DCs, 100 branches", no parentheses
+- Revenue, CNPJ count, geographic coverage, LinkedIn followers
+- Any text beyond the two numbers and "facilities" / "trucks/day"
+- Never vague — always output specific numbers even when estimated
 
 You must respond with ONLY valid JSON, no explanation, no markdown fences.`;
 
@@ -308,7 +312,7 @@ Respond with this exact JSON:
 
   return {
     relevantProds: String(parsed.relevantProds || '').slice(0, 200),
-    opEstimate:    String(parsed.opEstimate    || 'Unknown').slice(0, 100),
+    opEstimate:    String(parsed.opEstimate    || 'Unknown').slice(0, 150),
     icpReason:     String(parsed.icpReason     || '').slice(0, 600),
     icpScore,
   };
