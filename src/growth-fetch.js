@@ -166,6 +166,17 @@ async function scrapeProfile(page, profileUrl) {
     throw new Error(`Auth wall — redirected to ${landedUrl}. Session may be expired.`);
   }
 
+  // Detect dead / deleted profiles — check page text before scrolling
+  const pageText = await page.evaluate(() => (document.body.innerText || '').slice(0, 500));
+  if (
+    pageText.includes("This page doesn't exist") ||
+    pageText.includes("Página não encontrada") ||
+    pageText.includes("Page not found") ||
+    pageText.includes("profile is not available")
+  ) {
+    throw new Error(`Dead profile — page does not exist: ${profileUrl}`);
+  }
+
 
   // Scroll in 4 stages. LinkedIn uses IntersectionObserver to lazy-load Experience section.
   // We scroll both the window and the main container to cover all LinkedIn layouts.
@@ -206,8 +217,16 @@ async function scrapeProfile(page, profileUrl) {
       'For Business','Learning','More','Connect','Message','Follow',
       'Pending','Open to','Hiring','Promote profile',
     ]);
+    // Section headers and UI labels that must never be treated as names
+    const NOT_A_NAME = new Set([
+      'Experience','Experiência','Education','Educação','Skills','Habilidades',
+      'Highlights','About','Sobre','Featured','Recommendations','Recomendações',
+      'Activity','Atividade','Interests','Volunteer','Projects','Languages','Idiomas',
+      'Certifications','Certificações','Contact info','Show all','See more','See less',
+    ]);
 
-    // ── (1) Name — LinkedIn has no h1; name is the first non-nav line after "Learning"
+    // ── (1) Name — LinkedIn has no h1; name is the first non-nav, non-header line after "Learning".
+    // Names always contain at least one space (first + last name).
     // Nav bar ends with "Learning"; profile content starts immediately after.
     let name = '';
     let learningIdx = -1;
@@ -215,18 +234,20 @@ async function scrapeProfile(page, profileUrl) {
       if (allLines[i] === 'Learning') learningIdx = i;
     }
     if (learningIdx >= 0) {
-      for (let i = learningIdx + 1; i < Math.min(learningIdx + 6, allLines.length); i++) {
+      for (let i = learningIdx + 1; i < Math.min(learningIdx + 8, allLines.length); i++) {
         const l = allLines[i];
-        if (l && l.length > 2 && l.length < 80 && !l.match(/^\d/) && !NAV_ITEMS.has(l)) {
+        if (l && l.includes(' ') && l.length > 2 && l.length < 80
+            && !l.match(/^\d/) && !NAV_ITEMS.has(l) && !NOT_A_NAME.has(l)) {
           name = l;
           break;
         }
       }
     }
-    // Fallback: first two-word line without digits that isn't a nav item
+    // Fallback: first two-word line without digits that isn't a nav item or section header
     if (!name) {
       for (const l of allLines.slice(0, 30)) {
-        if (l.length > 3 && l.length < 60 && !l.match(/\d/) && l.includes(' ') && !NAV_ITEMS.has(l)) {
+        if (l.length > 3 && l.length < 60 && !l.match(/\d/) && l.includes(' ')
+            && !NAV_ITEMS.has(l) && !NOT_A_NAME.has(l)) {
           name = l;
           break;
         }
@@ -348,13 +369,24 @@ async function scrapeProfile(page, profileUrl) {
     // If Experience section didn't load, title stays empty.
 
     // ── Fallback for company — intro card shows current employer after "Contact info"
+    // Many LinkedIn UI strings can leak here — filter them all out aggressively.
+    const JUNK_LINE = (l) =>
+      !l || l.length < 2 || l.length > 120 ||
+      /^\d/.test(l) ||                                        // starts with digit (counts)
+      l === '·' || l.startsWith('·') ||
+      l === 'See all' || l === 'Show all' ||
+      EMPLOYMENT_TYPES.has(l) ||
+      DURATION_RE.test(l) ||
+      NOT_A_NAME.has(l) ||
+      /\b(connection|follower|following)\b/i.test(l) ||       // "500 connections", "1,234 followers"
+      /busca|oportunidade|open to work|looking for/i.test(l); // "Em busca de nova oportunidade"
+
     if (!company) {
       const contactIdx = allLines.indexOf('Contact info');
       if (contactIdx >= 0) {
-        for (let i = contactIdx + 1; i < Math.min(contactIdx + 5, allLines.length); i++) {
+        for (let i = contactIdx + 1; i < Math.min(contactIdx + 8, allLines.length); i++) {
           const l = allLines[i];
-          if (l && l.length > 1 && !l.match(/^\d/) && l !== '·' && !l.startsWith('·') && l !== 'See all'
-              && !EMPLOYMENT_TYPES.has(l) && !DURATION_RE.test(l)) {
+          if (!JUNK_LINE(l)) {
             company = l;
             break;
           }
