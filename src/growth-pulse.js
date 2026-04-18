@@ -97,7 +97,11 @@ export async function runPulse({ limit = DEFAULT_PULSE_LIMIT } = {}) {
         const changed = titleChanged || companyChanged;
 
         if (changed) {
-          glog.info(`[Pulse] CHANGE detected — ${row.name} | title: "${row.title}" → "${scraped.title}" | company: "${row.company}" → "${scraped.company}"`);
+          const changeDesc = [
+            titleChanged   ? `title: "${row.title}" → "${scraped.title}"` : null,
+            companyChanged ? `company: "${row.company}" → "${scraped.company}"` : null,
+          ].filter(Boolean).join(' | ');
+          glog.info(`[Pulse] CHANGE detected — ${row.name} | ${changeDesc}`);
 
           // 1. Log to Changes tab (old values before overwriting)
           await appendChange({
