@@ -1,13 +1,13 @@
 // growth-enrich.js — Job 3: Enrich Profile Data
-// For each Fetched row: Brave Search research on name + company,
-// Claude ICP scoring based on real operation signals.
+// For each Fetched row: two Brave Search queries (person + company),
+// Claude ICP scoring based on combined real operation signals.
 // Status: Fetched → Enriched. No LinkedIn interaction.
 
 import { getRowsByStatus, batchUpdateRows } from './growth-sheets.js';
 import { glog } from './growth-logger.js';
 
-const BRAVE_URL   = 'https://api.search.brave.com/res/v1/web/search';
-const CLAUDE_URL  = 'https://api.anthropic.com/v1/messages';
+const BRAVE_URL    = 'https://api.search.brave.com/res/v1/web/search';
+const CLAUDE_URL   = 'https://api.anthropic.com/v1/messages';
 const CLAUDE_MODEL = 'claude-sonnet-4-6';
 
 export const DEFAULT_ENRICH_LIMIT = 50;
@@ -44,7 +44,7 @@ export async function runEnrich({ limit = DEFAULT_ENRICH_LIMIT } = {}) {
     glog.info(`[Enrich] ${rows.length} Fetched rows found, processing ${batch.length}`);
 
     if (batch.length === 0) {
-      glog.warn('[Enrich] No Fetched rows — run Job 2 (Fetch) first');
+      glog.warn('[Enrich] No Fetched rows — run Batch 2 (Fetch) first');
       setProgress({ status: 'done' });
       return { total: 0, enriched: 0, failed: 0 };
     }
@@ -111,13 +111,19 @@ export async function runEnrich({ limit = DEFAULT_ENRICH_LIMIT } = {}) {
 // ── ENRICH ONE PROFILE ────────────────────────────────────────────────────────
 
 export async function enrichProfile(row, onBraveDone) {
-  // Build search query from real data scraped in Batch 2
-  const query = [row.name, row.company, 'logística', 'Brasil']
-    .filter(Boolean).join(' ');
+  // Two Brave searches run in parallel:
+  //   1. Person search — name + company: confirms role, finds LinkedIn activity, news mentions
+  //   2. Company search — company + operations keywords: assesses operation scale, fleet size, facilities
+  const personQuery  = [row.name, row.company, 'Brasil'].filter(Boolean).join(' ');
+  const companyQuery = [row.company, 'operações', 'logística', 'frota', 'Brasil'].filter(Boolean).join(' ');
 
-  const searchResults = await braveSearch(query);
-  onBraveDone?.();  // fires after Brave, before Claude — used by Batch 2 pipeline for live tracking
-  return await claudeScore(row, searchResults);
+  const [personResults, companyResults] = await Promise.all([
+    braveSearch(personQuery),
+    row.company ? braveSearch(companyQuery) : Promise.resolve('(no company — skipped)'),
+  ]);
+
+  onBraveDone?.();  // fires after both Brave searches complete — used by Batch 2 pipeline for live tracking
+  return await claudeScore(row, personResults, companyResults);
 }
 
 // ── BRAVE SEARCH ──────────────────────────────────────────────────────────────
@@ -141,12 +147,12 @@ async function braveSearch(query) {
   return (data.web?.results || [])
     .map(r => `${r.title || ''}: ${r.description || ''}`)
     .join('\n')
-    .slice(0, 2500);
+    .slice(0, 2000);
 }
 
 // ── CLAUDE ICP SCORING ────────────────────────────────────────────────────────
 
-const SYSTEM_PROMPT = `You are an ICP scoring expert for Volmera — a Brazilian Yard Management System (YMS) SaaS for the logistics and agribusiness sector.
+const SYSTEM_PROMPT = `You are an ICP scoring expert for Volmera — a Brazilian Yard Management System (YMS) SaaS.
 
 ## Volmera Products
 1. **Volmera YMS** — Yard Management System: dock scheduling, truck slot booking, real-time yard visibility, detention cost reduction. Automatic line-up: when a scheduled truck misses its slot, the system pulls the longest-waiting truck in the queue to fill the empty dock — eliminating idle dock time and cutting detention costs automatically.
@@ -154,36 +160,41 @@ const SYSTEM_PROMPT = `You are an ICP scoring expert for Volmera — a Brazilian
 3. **Volmera Pallet Marketplace** — Connects pallet manufacturers directly with buyers. Reduces procurement friction.
 
 ## Ideal Customer Profile (ICP)
-Companies with significant physical goods movement in Brazil — especially agribusiness, high-volume manufacturers, 3PL operators, terminal operators.
+Any Brazilian company with significant physical goods movement. Target industries include (but are not limited to):
+- **Agribusiness & food:** grain traders, soy/corn exporters, sugar mills, fertiliser distributors, food producers, slaughterhouses (frigoríficos), cold chain operators
+- **Logistics & transport:** 3PL operators, freight carriers, terminal operators, port logistics, distribution centres, last-mile operators
+- **Manufacturing & industry:** high-volume manufacturers, automotive parts, chemical, steel, consumer goods with large warehousing operations
+- **Retail & distribution:** large-scale retail distribution, wholesalers with multiple distribution centres
+- **Energy & construction:** companies with large equipment/material yards requiring dock and slot management
 
 **YMS target operation baseline:** 3+ facilities (docks/terminals/warehouses) AND 40+ trucks per day. Below this threshold, a YMS adds limited value.
 
 **Role seniority for scoring:**
-- Decision maker (Director, VP, Head of, Gerente, COO, Operations Manager) = can buy or strongly influence purchase → higher score
-- Influencer (Supervisor, Analyst, Coordinator, Specialist) = can influence but cannot decide alone → medium score
+- Decision maker (Director, VP, Head of, Gerente, COO, Operations Manager, Supply Chain Manager, Logistics Director) = can buy or strongly influence purchase → higher score
+- Influencer (Supervisor, Analyst, Coordinator, Specialist, Process Engineer) = can influence but cannot decide alone → medium score
 - Contributor/intern/individual role without team scope = unlikely to buy → lower score
 
 ## ICP Score (1–10)
-- **9–10**: Perfect — decision maker at a large Brazilian logistics/agribusiness operation with clear YMS need (multiple facilities, high truck volume)
+- **9–10**: Perfect — decision maker at a large Brazilian operation (logistics/agribusiness/manufacturing/3PL) with clear YMS need (multiple facilities, high truck volume)
 - **7–8**: Strong — decision maker at a mid-size operation, OR senior influencer at a large operation
 - **5–6**: Possible — right industry but unclear scale, or right scale but non-decision role
-- **3–4**: Weak — adjacent industry, small operation, or junior role
-- **1–2**: Not a fit — software company, YMS competitor, unrelated industry, or intern/student
+- **3–4**: Weak — adjacent or small-scale industry, or junior role
+- **1–2**: Not a fit — software company, YMS competitor, unrelated service industry, or intern/student
 
 **Operation size inference rules (apply when search results are thin):**
-- A "Diretor", "Gerente", "Head of", or "VP" at any logistics/agribusiness company → at minimum Medium
-- Company name contains "Logística", "Transportes", "Frigorífico", "Agroindustrial", "Armazém", "Terminal", "Porto" → infer logistics/agribusiness, likely Medium+
-- 3PL operators, cold chain, grain traders, fertiliser distributors → typically Large
+- A "Diretor", "Gerente", "Head of", or "VP" at any logistics/agribusiness/manufacturing company → at minimum Medium
+- Company name contains "Logística", "Transportes", "Frigorífico", "Agroindustrial", "Armazém", "Terminal", "Porto", "Distribuidora", "Indústria", "Alimentos", "Grãos" → infer industrial/logistics, likely Medium+
+- 3PL operators, cold chain, grain traders, fertiliser distributors, slaughterhouses → typically Large
 - Small retail/service companies → Small
 - When truly no signals exist, use "Small–Medium (inferred)" — never output just "Unknown"
 
-**icpReason format:** Always return exactly 3 bullet points as a single string, each starting with "• ", separated by newline. Keep each bullet under 15 words. Cover: (1) role/seniority, (2) company/industry fit, (3) operation scale. Write entirely in English — translate job titles, never use Portuguese words.
+**icpReason format:** Always return exactly 3 bullet points as a single string, each starting with "• ", separated by newline. Keep each bullet under 15 words. Cover: (1) role/seniority, (2) company/industry fit, (3) operation scale. Write entirely in English — translate job titles and company types, never use Portuguese words in your output.
 
-**Role currency:** Cross-check the scraped title/company against the Brave search results. If the person has left the company or the role is clearly from the past, lower the score by 3–4 points and flag it in bullet 1.
+**Role currency:** You receive TWO search result sets — one for the person, one for the company. Cross-check the scraped title/company against both. If the person has left the company or the role is clearly from the past, lower the score by 3–4 points and flag it in bullet 1. Use the company search to assess operation scale independently of the person search.
 
 You must respond with ONLY valid JSON, no explanation, no markdown fences.`;
 
-async function claudeScore(row, searchResults) {
+async function claudeScore(row, personSearchResults, companySearchResults) {
   // isCurrentRole: null = Experience section not parsed (unknown)
   //                true = Present date confirmed
   //                false = Experience section parsed, no Present found → past role
@@ -197,7 +208,7 @@ async function claudeScore(row, searchResults) {
   const roleDateLine = isPastRole
     ? `- Role status: PAST ROLE — date: ${row.roleDate || '(no Present on LinkedIn)'}`
     : isUnknown
-      ? `- Role status: UNVERIFIED — Experience section did not load; use Brave results to confirm if still employed`
+      ? `- Role status: UNVERIFIED — Experience section did not load; use search results to confirm if still employed`
       : `- Role status: CURRENT — date: ${row.roleDate || 'Present'}`;
 
   const userMsg = `Profile to score:
@@ -206,21 +217,25 @@ async function claudeScore(row, searchResults) {
 - Company: ${row.company || '(unknown)'}
 - LinkedIn: ${row.profileUrl}
 ${roleDateLine}
-Brave Search results for "${row.name} ${row.company}":
-${searchResults || '(no results — use title and company to infer)'}
 
-Score this person's ICP fit for Volmera. Consider:
+--- SEARCH RESULTS: PERSON ("${row.name} ${row.company}") ---
+${personSearchResults || '(no results)'}
+
+--- SEARCH RESULTS: COMPANY ("${row.company} operações logística Brasil") ---
+${companySearchResults || '(no results)'}
+
+Score this person's ICP fit for Volmera. Synthesize BOTH search result sets. Consider:
 1. Their seniority level (decision maker / influencer / contributor)
-2. Whether the scraped role is still their current position (check search results)
-3. Their company's likely operation scale (number of facilities, truck volume) for YMS relevance
-4. Industry fit (logistics, agribusiness, manufacturing, 3PL)
-5. Which Volmera product fits best
+2. Whether the scraped role is still current (check person search results)
+3. The company's actual operation scale — use company search to find number of facilities, fleet size, revenue, employee count
+4. Industry fit (logistics, agribusiness, manufacturing, 3PL, cold chain, distribution)
+5. Which Volmera product fits best given company type and scale
 
 Respond with this exact JSON:
 {
   "relevantProds": "YMS / Freight Marketplace / Pallet Marketplace — or a combination e.g. YMS, Freight Marketplace",
-  "opEstimate": "Large (10+ facilities, 200+ trucks/day) OR Medium (3-10 facilities, 40-200 trucks/day) OR Small (<3 facilities) — never Unknown, always infer",
-  "icpReason": "• Role: ...\n• Industry: ...\n• Scale: ...",
+  "opEstimate": "Large (10+ facilities, 200+ trucks/day) OR Medium (3-10 facilities, 40-200 trucks/day) OR Small (<3 facilities, <40 trucks/day) — never Unknown, always infer from all available signals",
+  "icpReason": "• Role: ...\\n• Industry: ...\\n• Scale: ...",
   "icpScore": 7
 }`;
 
@@ -254,8 +269,8 @@ Respond with this exact JSON:
   // Confirmed past role → hard cap at 5 (can't sell to someone with no current job)
   // Unverified (Experience section didn't load) → soft cap at 7 (benefit of doubt,
   // but prevents 9/10 on profiles we can't confirm are still active)
-  const icpScore = isPastRole  ? Math.min(rawScore, 5)
-                 : isUnknown   ? Math.min(rawScore, 7)
+  const icpScore = isPastRole ? Math.min(rawScore, 5)
+                 : isUnknown  ? Math.min(rawScore, 7)
                  : rawScore;
 
   return {

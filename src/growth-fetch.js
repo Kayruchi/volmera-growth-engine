@@ -241,6 +241,12 @@ async function scrapeProfile(page, profileUrl) {
     const PRESENT_RE = /\bpresent\b|\batual\b|\bo momento\b|\bpresente\b|\batualmente\b/i;
     const MONTH_RE   = /^(Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec|Fev|Abr|Mai|Ago|Set|Out|Dez)/i;
     const SECTION_END = /^(Education|Educação|Skills|Habilidades|Languages|Idiomas|Certifications|Certificações|Recomendações|Interests|Volunteer|Projects)$/i;
+    // Lines that look like durations ("3 yrs 2 mos", "2 anos 4 meses") or employment types
+    const DURATION_RE = /\d+\s*(yr|mo|ano|mê|mes)/i;
+    const EMPLOYMENT_TYPES = new Set([
+      'Full-time','Part-time','Contract','Freelance','Internship','Self-employed','Seasonal',
+      'Tempo integral','Meio período','Autônomo','Estágio','Temporário',
+    ]);
 
     let title = '', company = '', isCurrentRole = null, roleDate = '';
     // isCurrentRole: null = Experience section not found/parsed
@@ -273,8 +279,16 @@ async function scrapeProfile(page, profileUrl) {
             entryDate = next; // e.g. "Jan 2020 - Present" or "Mar 2018 - Dec 2024"
             break;
           }
-          if (!entryCompany && next.length > 1) {
-            entryCompany = next.includes(' · ') ? next.split(' · ')[0].trim() : next;
+          // Skip duration strings, employment type labels, and digit-only artifacts
+          if (!entryCompany && next.length > 1
+              && !DURATION_RE.test(next)
+              && !EMPLOYMENT_TYPES.has(next)
+              && !/^\d/.test(next)) {
+            const candidate = next.includes(' · ') ? next.split(' · ')[0].trim() : next;
+            // After splitting on ' · ', re-check that the candidate isn't a duration/digit
+            if (candidate && !DURATION_RE.test(candidate) && !/^\d/.test(candidate)) {
+              entryCompany = candidate;
+            }
           }
         }
 
@@ -288,16 +302,9 @@ async function scrapeProfile(page, profileUrl) {
       if (current) { title = current.title; company = current.company; roleDate = current.date; }
     }
 
-    // ── Fallback for title — LinkedIn headline sits right after the name in the intro card
-    if (!title && nameIdx >= 0) {
-      for (let i = nameIdx + 1; i < Math.min(nameIdx + 6, allLines.length); i++) {
-        const l = allLines[i];
-        if (l && l.length > 3 && !NAV_ITEMS.has(l) && !l.startsWith('·') && l !== name) {
-          title = l;
-          break;
-        }
-      }
-    }
+    // Title fallback intentionally removed — title must come from Experience section only.
+    // The LinkedIn headline (top of page) is user-customized and unreliable as a job title.
+    // If Experience section didn't load, title stays empty.
 
     // ── Fallback for company — intro card shows current employer after "Contact info"
     if (!company) {
