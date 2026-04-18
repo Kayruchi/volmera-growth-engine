@@ -184,16 +184,21 @@ Companies with significant physical goods movement in Brazil — especially agri
 You must respond with ONLY valid JSON, no explanation, no markdown fences.`;
 
 async function claudeScore(row, searchResults) {
-  // If no "Present" date was found in LinkedIn Experience, this is a past role.
-  // We hard-cap the score at 5 after Claude returns — but also tell Claude upfront
-  // so the reason text accurately reflects the stale status.
+  // isCurrentRole: null = Experience section not parsed (unknown)
+  //                true = Present date confirmed
+  //                false = Experience section parsed, no Present found → past role
   const isPastRole = row.isCurrentRole === false;
+  const isUnknown  = row.isCurrentRole === null || row.isCurrentRole === undefined;
+
   const displayTitle = isPastRole
-    ? `${row.title} [FORMER ROLE — left company, no current position found]`
+    ? `${row.title} [FORMER ROLE — LinkedIn shows no current employment here]`
     : (row.title || '(unknown)');
+
   const roleDateLine = isPastRole
-    ? `- Role date: ${row.roleDate || '(no Present date on LinkedIn)'} ← person has left this role`
-    : `- Role date: ${row.roleDate || 'Present'}`;
+    ? `- Role status: PAST ROLE — date: ${row.roleDate || '(no Present on LinkedIn)'}`
+    : isUnknown
+      ? `- Role status: UNVERIFIED — Experience section did not load; use Brave results to confirm if still employed`
+      : `- Role status: CURRENT — date: ${row.roleDate || 'Present'}`;
 
   const userMsg = `Profile to score:
 - Name: ${row.name || '(unknown)'}
@@ -245,10 +250,13 @@ Respond with this exact JSON:
 
   const parsed = JSON.parse(text);
 
-  // Hard cap: if LinkedIn showed no "Present" date, this is a past role.
-  // No matter what Claude scores, cap at 5 — can't sell to someone with no current job.
   const rawScore = Math.min(10, Math.max(1, Number(parsed.icpScore) || 1));
-  const icpScore = isPastRole ? Math.min(rawScore, 5) : rawScore;
+  // Confirmed past role → hard cap at 5 (can't sell to someone with no current job)
+  // Unverified (Experience section didn't load) → soft cap at 7 (benefit of doubt,
+  // but prevents 9/10 on profiles we can't confirm are still active)
+  const icpScore = isPastRole  ? Math.min(rawScore, 5)
+                 : isUnknown   ? Math.min(rawScore, 7)
+                 : rawScore;
 
   return {
     relevantProds: String(parsed.relevantProds || '').slice(0, 200),

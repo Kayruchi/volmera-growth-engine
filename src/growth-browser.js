@@ -90,13 +90,9 @@ export async function getLinkedInPage() {
   const { browser, context } = await launchBrowser();
   const page = await context.newPage();
 
-  // Minimize browser window so it doesn't interrupt the user's screen
-  try {
-    const cdp = await context.newCDPSession(page);
-    const { windowId } = await cdp.send('Browser.getWindowForTarget');
-    await cdp.send('Browser.setWindowBounds', { windowId, bounds: { windowState: 'minimized' } });
-    await cdp.detach();
-  } catch { /* not critical — continue even if CDP minimize fails */ }
+  // Window is kept off-screen via --window-position=-10000,-10000 in launchBrowser().
+  // CDP minimize is intentionally NOT used — minimized windows suspend rendering on macOS,
+  // which breaks LinkedIn's IntersectionObserver and prevents Experience section from loading.
 
   const loaded = await loadSession(context);
   if (!loaded || !(await isLoggedIn(page))) {

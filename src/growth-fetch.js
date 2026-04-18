@@ -164,9 +164,26 @@ async function scrapeProfile(page, profileUrl) {
   }
 
 
-  // Scroll to trigger lazy-load of experience section
-  await page.keyboard.press('End');
-  await page.waitForTimeout(1500);
+  // Scroll in 3 stages. LinkedIn may use a container div instead of window scroll,
+  // so we scroll both the window and the main content container.
+  await page.evaluate(() => {
+    const main = document.querySelector('.scaffold-layout__main, main, #main') || document.documentElement;
+    window.scrollTo(0, 900);
+    main.scrollTop = 900;
+  });
+  await page.waitForTimeout(1200);
+  await page.evaluate(() => {
+    const main = document.querySelector('.scaffold-layout__main, main, #main') || document.documentElement;
+    window.scrollTo(0, 1800);
+    main.scrollTop = 1800;
+  });
+  await page.waitForTimeout(1200);
+  await page.evaluate(() => {
+    const main = document.querySelector('.scaffold-layout__main, main, #main') || document.documentElement;
+    window.scrollTo(0, 99999);
+    main.scrollTop = 99999;
+  });
+  await page.waitForTimeout(3000);
 
   const result = await page.evaluate(() => {
     const allLines = (document.body.innerText || '')
@@ -221,11 +238,14 @@ async function scrapeProfile(page, profileUrl) {
     // ── (3) Title + (4) Company — primary source: Experience section ──────────
     // Parse job entries; prefer "Present"/"Atual" entry, fall back to most recent.
     const YEAR_RE    = /\d{4}/;
-    const PRESENT_RE = /\bpresent\b|\batual\b|\bo momento\b/i;
+    const PRESENT_RE = /\bpresent\b|\batual\b|\bo momento\b|\bpresente\b|\batualmente\b/i;
     const MONTH_RE   = /^(Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec|Fev|Abr|Mai|Ago|Set|Out|Dez)/i;
     const SECTION_END = /^(Education|Educação|Skills|Habilidades|Languages|Idiomas|Certifications|Certificações|Recomendações|Interests|Volunteer|Projects)$/i;
 
-    let title = '', company = '', isCurrentRole = true, roleDate = '';
+    let title = '', company = '', isCurrentRole = null, roleDate = '';
+    // isCurrentRole: null = Experience section not found/parsed
+    //                true = confirmed current (Present date found)
+    //                false = confirmed past (no Present in any entry)
 
     const expIdx = allLines.findIndex(l =>
       l === 'Experience' || l === 'Experiência' || l === 'Cargo atual'
@@ -263,7 +283,8 @@ async function scrapeProfile(page, profileUrl) {
 
       const presentEntry = entries.find(e => e.isPresent);
       const current = presentEntry || entries[0];
-      isCurrentRole = !!presentEntry;
+      // null = section not parsed; true = Present found; false = section parsed, no Present
+      isCurrentRole = entries.length > 0 ? !!presentEntry : null;
       if (current) { title = current.title; company = current.company; roleDate = current.date; }
     }
 
