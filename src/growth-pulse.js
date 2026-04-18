@@ -7,7 +7,7 @@
 // Skipped statuses: Scraped, Fetched (not processed yet), Dead.
 
 import { getLinkedInPage } from './growth-browser.js';
-import { getAllRows, batchUpdateRows, appendChange } from './growth-sheets.js';
+import { getAllRows, batchUpdateRows, appendChange, today } from './growth-sheets.js';
 import { enrichProfile } from './growth-enrich.js';
 import { scrapeProfile } from './growth-fetch.js';
 import { glog } from './growth-logger.js';
@@ -52,8 +52,10 @@ export async function runPulse({ limit = DEFAULT_PULSE_LIMIT } = {}) {
 
     const isEligible = (row) => {
       if (SKIP_STATUSES.has(row.status)) return false;
-      if (!row.lastPulse) return true;             // never pulse-checked
-      return new Date(row.lastPulse) < cutoff;     // last check was 90+ days ago
+      if (!row.lastPulse) return true;  // never pulse-checked
+      // lastPulse stored as dd-mm-yyyy — parse to Date for comparison
+      const [dd, mm, yyyy] = row.lastPulse.split('-');
+      return new Date(`${yyyy}-${mm}-${dd}`) < cutoff;
     };
 
     const priority  = all.filter(r => PRIORITY_STATUSES.includes(r.status) && isEligible(r));
@@ -81,7 +83,7 @@ export async function runPulse({ limit = DEFAULT_PULSE_LIMIT } = {}) {
 
     for (const row of batch) {
       setProgress({ current: row.profileUrl });
-      const today = new Date().toISOString().slice(0, 10);
+      const todayStr = today();
 
       try {
         const scraped = await scrapeProfile(page, row.profileUrl);
@@ -133,7 +135,7 @@ export async function runPulse({ limit = DEFAULT_PULSE_LIMIT } = {}) {
                 opEstimate:    enrichData.opEstimate,
                 icpReason:     enrichData.icpReason,
                 icpScore:      enrichData.icpScore,
-                lastPulse:     today,
+                lastPulse:     todayStr,
               },
             }]);
             glog.info(`[Pulse] Re-enriched — ${row.name} | new score: ${enrichData.icpScore}`);

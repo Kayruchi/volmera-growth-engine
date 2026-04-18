@@ -225,13 +225,22 @@ export async function appendMarketingMessage(rowIndex, direction, senderLabel, t
   const all = await getAllRows();
   const row = all.find(r => r.rowIndex === rowIndex);
   const existing = row?.marketingMsg || '';
-  const date = new Date().toISOString().slice(0, 10);
+  const date = today();
   const entry = `[${date}] ${direction === 'sent' ? `Volmera → ${senderLabel}` : `${senderLabel} → Volmera`}: ${textEN}`;
   const updated = existing ? existing + '\n' + entry : entry;
   await updateRow(rowIndex, { marketingMsg: updated });
 }
 
 // ── HELPERS ───────────────────────────────────────────────────────────────────
+
+/** Returns today's date as dd-mm-yyyy */
+export function today() {
+  const d = new Date();
+  const dd = String(d.getDate()).padStart(2, '0');
+  const mm = String(d.getMonth() + 1).padStart(2, '0');
+  const yyyy = d.getFullYear();
+  return `${dd}-${mm}-${yyyy}`;
+}
 
 function rowToObj(row, rowIndex) {
   return {
@@ -305,7 +314,7 @@ function colKeyToField(key) { return _colKeyToField[key] || key.toLowerCase(); }
 /** Append a detected job change to the Changes tab. */
 export async function appendChange({ profileUrl, name, oldTitle, oldCompany }) {
   const client = getSheetsClient();
-  const detectedOn = new Date().toISOString().slice(0, 10);
+  const detectedOn = today();
   await client.spreadsheets.values.append({
     spreadsheetId: SPREADSHEET_ID,
     range: `${CHANGES_TAB}!A:F`,
