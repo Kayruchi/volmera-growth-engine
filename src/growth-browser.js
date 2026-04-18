@@ -89,6 +89,15 @@ export async function launchBrowser() {
 export async function getLinkedInPage() {
   const { browser, context } = await launchBrowser();
   const page = await context.newPage();
+
+  // Minimize browser window so it doesn't interrupt the user's screen
+  try {
+    const cdp = await context.newCDPSession(page);
+    const { windowId } = await cdp.send('Browser.getWindowForTarget');
+    await cdp.send('Browser.setWindowBounds', { windowId, bounds: { windowState: 'minimized' } });
+    await cdp.detach();
+  } catch { /* not critical — continue even if CDP minimize fails */ }
+
   const loaded = await loadSession(context);
   if (!loaded || !(await isLoggedIn(page))) {
     await login(page);

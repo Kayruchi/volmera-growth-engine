@@ -177,25 +177,32 @@ Companies with significant physical goods movement in Brazil — especially agri
 - Small retail/service companies → Small
 - When truly no signals exist, use "Small–Medium (inferred)" — never output just "Unknown"
 
-**icpReason format:** Always return exactly 3 bullet points as a single string, each starting with "• ", separated by newline. Keep each bullet under 15 words. Cover: (1) role/seniority, (2) company/industry fit, (3) operation scale.
+**icpReason format:** Always return exactly 3 bullet points as a single string, each starting with "• ", separated by newline. Keep each bullet under 15 words. Cover: (1) role/seniority, (2) company/industry fit, (3) operation scale. Write entirely in English — translate job titles, never use Portuguese words.
+
+**Role currency:** Cross-check the scraped title/company against the Brave search results. If the person has left the company or the role is clearly from the past, lower the score by 3–4 points and flag it in bullet 1.
 
 You must respond with ONLY valid JSON, no explanation, no markdown fences.`;
 
 async function claudeScore(row, searchResults) {
+  const roleWarning = row.isCurrentRole === false
+    ? '⚠️ STALE ROLE WARNING: No "Present/Current" date was found in their LinkedIn Experience section. This title may be a past role. Verify against search results — if they have moved on, reduce score by 3–4 points and note it in icpReason bullet 1.'
+    : '';
+
   const userMsg = `Profile to score:
 - Name: ${row.name || '(unknown)'}
 - Title: ${row.title || '(unknown)'}
 - Company: ${row.company || '(unknown)'}
 - LinkedIn: ${row.profileUrl}
-
+${roleWarning ? '\n' + roleWarning : ''}
 Brave Search results for "${row.name} ${row.company}":
 ${searchResults || '(no results — use title and company to infer)'}
 
 Score this person's ICP fit for Volmera. Consider:
 1. Their seniority level (decision maker / influencer / contributor)
-2. Their company's likely operation scale (number of facilities, truck volume) for YMS relevance
-3. Industry fit (logistics, agribusiness, manufacturing, 3PL)
-4. Which Volmera product fits best
+2. Whether the scraped role is still their current position (check search results)
+3. Their company's likely operation scale (number of facilities, truck volume) for YMS relevance
+4. Industry fit (logistics, agribusiness, manufacturing, 3PL)
+5. Which Volmera product fits best
 
 Respond with this exact JSON:
 {

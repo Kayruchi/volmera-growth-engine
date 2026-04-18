@@ -72,7 +72,7 @@ export async function runFetch({ limit = DEFAULT_FETCH_LIMIT } = {}) {
 
         // ── Fire background enrich — runs during next LinkedIn delay ──────────
         // Merges scraped data into the row object so enrichProfile has name/company
-        const rowWithData = { ...row, name: data.name, title: data.title, company: data.company };
+        const rowWithData = { ...row, name: data.name, title: data.title, company: data.company, isCurrentRole: data.isCurrentRole };
         const enrichTask = enrichProfile(rowWithData, () => {
           setProgress({ braved: fetchProgress.braved + 1 });
         })
@@ -225,7 +225,7 @@ async function scrapeProfile(page, profileUrl) {
     const MONTH_RE   = /^(Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec|Fev|Abr|Mai|Ago|Set|Out|Dez)/i;
     const SECTION_END = /^(Education|Educação|Skills|Habilidades|Languages|Idiomas|Certifications|Certificações|Recomendações|Interests|Volunteer|Projects)$/i;
 
-    let title = '', company = '';
+    let title = '', company = '', isCurrentRole = true;
 
     const expIdx = allLines.findIndex(l =>
       l === 'Experience' || l === 'Experiência' || l === 'Cargo atual'
@@ -260,7 +260,9 @@ async function scrapeProfile(page, profileUrl) {
         if (dateFound) entries.push({ title: l, company: entryCompany, isPresent });
       }
 
-      const current = entries.find(e => e.isPresent) || entries[0];
+      const presentEntry = entries.find(e => e.isPresent);
+      const current = presentEntry || entries[0];
+      isCurrentRole = !!presentEntry;
       if (current) { title = current.title; company = current.company; }
     }
 
@@ -289,7 +291,7 @@ async function scrapeProfile(page, profileUrl) {
       }
     }
 
-    return { name, title, company, location };
+    return { name, title, company, location, isCurrentRole };
   });
 
   if (!result.name) {
