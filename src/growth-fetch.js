@@ -1,27 +1,28 @@
-// growth-fetch.js — Job 2: Fetch & Enrich Profile Data
-// For each Scraped profile: Brave Search → Claude ICP analysis → write back to sheet.
-// Target: 50 profiles per run (configurable). No LinkedIn interaction — API only.
+// growth-fetch.js — Job 2: Fetch Profile Data (with pipeline enrich)
+// Playwright visits each Scraped profile URL, extracts Name, Title, Company.
+// Status: Scraped → Fetched → Enriched (inline, during LinkedIn delays).
+// Job 3 (Enrich) remains as a standalone button for re-enriching Fetched rows.
 
+import { getLinkedInPage } from './growth-browser.js';
 import { getRowsByStatus, batchUpdateRows } from './growth-sheets.js';
+import { enrichProfile } from './growth-enrich.js';
 import { glog } from './growth-logger.js';
-
-const BRAVE_URL   = 'https://api.search.brave.com/res/v1/web/search';
-const CLAUDE_URL  = 'https://api.anthropic.com/v1/messages';
-const CLAUDE_MODEL = 'claude-sonnet-4-6';
 
 export const DEFAULT_FETCH_LIMIT = 50;
 
 // ── IN-MEMORY PROGRESS ────────────────────────────────────────────────────────
 export const fetchProgress = {
-  status:    'idle',   // idle | running | done | error
-  total:     0,
-  done:      0,
-  enriched:  0,
-  rejected:  0,
-  failed:    0,
-  current:   null,    // profile URL currently being processed
-  error:     null,
-  updatedAt: null,
+  status:       'idle',   // idle | running | done | error
+  total:        0,
+  done:         0,
+  fetched:      0,
+  braved:       0,   // rows where Brave Search completed
+  enriched:     0,   // rows where Claude ICP scoring completed
+  enrichFailed: 0,   // rows where background enrich failed (stay as Fetched for Batch 3 retry)
+  failed:       0,
+  current:      null,
+  error:        null,
+  updatedAt:    null,
 };
 
 function setProgress(update) {
@@ -31,10 +32,11 @@ function setProgress(update) {
 // ── MAIN EXPORT ───────────────────────────────────────────────────────────────
 
 export async function runFetch({ limit = DEFAULT_FETCH_LIMIT } = {}) {
-  setProgress({ status: 'running', total: 0, done: 0, enriched: 0, rejected: 0, failed: 0, current: null, error: null });
+  setProgress({ status: 'running', total: 0, done: 0, fetched: 0, braved: 0, enriched: 0, enrichFailed: 0, failed: 0, current: null, error: null });
   glog.info(`[Fetch] Starting — limit: ${limit}`);
 
-  const updates = [];
+  let browser;
+  const enrichPromises = []; // background enrich tasks — run during LinkedIn delays
 
   try {
     // ── Load Scraped rows ─────────────────────────────────────────────────────
@@ -44,206 +46,255 @@ export async function runFetch({ limit = DEFAULT_FETCH_LIMIT } = {}) {
     glog.info(`[Fetch] ${rows.length} Scraped rows found, processing ${batch.length}`);
 
     if (batch.length === 0) {
-      glog.warn('[Fetch] No Scraped rows to enrich');
+      glog.warn('[Fetch] No Scraped rows — nothing to do');
       setProgress({ status: 'done' });
-      return { enriched: 0, rejected: 0, failed: 0, total: 0 };
+      return { total: 0, fetched: 0, braved: 0, enriched: 0, failed: 0 };
     }
 
-    // ── Process each profile ──────────────────────────────────────────────────
+    // ── Launch LinkedIn browser ───────────────────────────────────────────────
+    const session = await getLinkedInPage();
+    browser = session.browser;
+    const page = session.page;
+
     for (const row of batch) {
-      setProgress({ current: row.profileUrl, done: fetchProgress.done });
+      setProgress({ current: row.profileUrl });
 
       try {
-        const data = await enrichProfile(row.profileUrl);
+        const data = await scrapeProfile(page, row.profileUrl);
 
-        const newStatus = (data.icpScore >= 5) ? 'Enriched' : 'Rejected';
-
-        updates.push({
+        // Write Name/Title/Company + Fetched status immediately
+        await batchUpdateRows([{
           rowIndex: row.rowIndex,
-          data: {
-            name:          data.name,
-            title:         data.title,
-            company:       data.company,
-            relevantProds: data.relevantProds,
-            opEstimate:    data.opEstimate,
-            icpReason:     data.icpReason,
-            icpScore:      data.icpScore,
-            status:        newStatus,
-          },
-        });
+          data: { name: data.name, title: data.title, company: data.company, status: 'Fetched' },
+        }]);
+        setProgress({ fetched: fetchProgress.fetched + 1 });
+        glog.info(`[Fetch] Scraped — "${data.name}" | "${data.title}" | "${data.company}" | loc: "${data.location}"`);
 
-        if (newStatus === 'Enriched') {
-          setProgress({ enriched: fetchProgress.enriched + 1 });
-          glog.info(`[Fetch] Enriched ${row.profileUrl} — score: ${data.icpScore}, status: ${newStatus}`);
-        } else {
-          setProgress({ rejected: fetchProgress.rejected + 1 });
-          glog.info(`[Fetch] Rejected ${row.profileUrl} — score: ${data.icpScore} (below 5)`);
-        }
+        // ── Fire background enrich — runs during next LinkedIn delay ──────────
+        // Merges scraped data into the row object so enrichProfile has name/company
+        const rowWithData = { ...row, name: data.name, title: data.title, company: data.company };
+        const enrichTask = enrichProfile(rowWithData, () => {
+          setProgress({ braved: fetchProgress.braved + 1 });
+        })
+          .then(async (enrichData) => {
+            await batchUpdateRows([{
+              rowIndex: row.rowIndex,
+              data: {
+                relevantProds: enrichData.relevantProds,
+                opEstimate:    enrichData.opEstimate,
+                icpReason:     enrichData.icpReason,
+                icpScore:      enrichData.icpScore,
+                status:        'Enriched',
+              },
+            }]);
+            setProgress({ enriched: fetchProgress.enriched + 1 });
+            glog.info(`[Fetch] Enriched — "${data.name}" score: ${enrichData.icpScore} | ${enrichData.relevantProds}`);
+          })
+          .catch(e => {
+            setProgress({ enrichFailed: fetchProgress.enrichFailed + 1 });
+            glog.warn(`[Fetch] Background enrich failed for ${row.profileUrl}: ${e.message}`);
+            // Row stays as Fetched — Job 3 will pick it up on next run
+          });
+        enrichPromises.push(enrichTask);
 
       } catch (e) {
         setProgress({ failed: fetchProgress.failed + 1 });
-        glog.warn(`[Fetch] Failed to enrich ${row.profileUrl}: ${e.message}`);
-        // Leave status as Scraped — will be retried next run
+        glog.warn(`[Fetch] Scrape failed ${row.profileUrl}: ${e.message}`);
+        // Row stays as Scraped — retried on next Job 2 run
       }
 
       setProgress({ done: fetchProgress.done + 1 });
 
-      // Polite delay between profiles (600–1000ms) to respect Brave rate limits
+      // LinkedIn polite delay (3–5s) — background enrich runs during this window
       if (fetchProgress.done < batch.length) {
-        await sleep(600 + Math.random() * 400);
+        await page.waitForTimeout(3000 + Math.random() * 2000);
       }
     }
 
-    // ── Batch write all updates ───────────────────────────────────────────────
-    if (updates.length > 0) {
-      glog.info(`[Fetch] Writing ${updates.length} enriched rows to sheet...`);
-      await batchUpdateRows(updates);
-      glog.info('[Fetch] Sheet updated');
+    // ── Wait for any still-running enriches ───────────────────────────────────
+    if (enrichPromises.length > 0) {
+      const pending = enrichPromises.length - fetchProgress.enriched - fetchProgress.enrichFailed;
+      if (pending > 0) {
+        setProgress({ current: `Waiting for ${pending} enrichment(s) to finish...` });
+        glog.info(`[Fetch] Scraping done — waiting for ${pending} background enriches`);
+      }
+      await Promise.allSettled(enrichPromises);
     }
 
     const result = {
-      total:     batch.length,
-      enriched:  fetchProgress.enriched,
-      rejected:  fetchProgress.rejected,
-      failed:    fetchProgress.failed,
-      completedAt: new Date().toISOString(),
+      total:        batch.length,
+      fetched:      fetchProgress.fetched,
+      braved:       fetchProgress.braved,
+      enriched:     fetchProgress.enriched,
+      enrichFailed: fetchProgress.enrichFailed,
+      failed:       fetchProgress.failed,
+      completedAt:  new Date().toISOString(),
     };
 
-    setProgress({ status: 'done' });
-    glog.info(`[Fetch] Done — enriched: ${result.enriched}, rejected: ${result.rejected}, failed: ${result.failed}`);
+    setProgress({ status: 'done', current: null });
+    glog.info(`[Fetch] Done — fetched: ${result.fetched}, enriched: ${result.enriched}, enrichFailed: ${result.enrichFailed}, failed: ${result.failed}`);
     return result;
 
   } catch (e) {
     setProgress({ status: 'error', error: e.message });
     glog.error('[Fetch] Failed', e);
     throw e;
+  } finally {
+    if (browser) {
+      try { await browser.close(); } catch { /* ignore */ }
+    }
   }
 }
 
-// ── ENRICH SINGLE PROFILE ─────────────────────────────────────────────────────
+// ── PROFILE SCRAPER ───────────────────────────────────────────────────────────
 
-async function enrichProfile(profileUrl) {
-  const username = extractUsername(profileUrl);
+async function scrapeProfile(page, profileUrl) {
+  await page.goto(profileUrl, { waitUntil: 'domcontentloaded', timeout: 30000 });
+  await page.waitForTimeout(4000); // fixed wait — no waitFor, no polling
 
-  // 1. Brave Search
-  const searchResults = await braveSearch(
-    `"${username}" linkedin Brazil logistics supply chain operations`
-  );
+  // Detect auth wall / login redirect
+  const landedUrl = page.url();
+  if (
+    landedUrl.includes('/login') ||
+    landedUrl.includes('/authwall') ||
+    landedUrl.includes('/signup') ||
+    landedUrl.includes('/checkpoint')
+  ) {
+    throw new Error(`Auth wall — redirected to ${landedUrl}. Session may be expired.`);
+  }
 
-  // 2. Claude ICP Analysis
-  return await claudeAnalyze(profileUrl, username, searchResults);
-}
 
-// ── BRAVE SEARCH ──────────────────────────────────────────────────────────────
+  // Scroll to trigger lazy-load of experience section
+  await page.keyboard.press('End');
+  await page.waitForTimeout(1500);
 
-async function braveSearch(query) {
-  const url = `${BRAVE_URL}?q=${encodeURIComponent(query)}&count=5&country=BR&lang=pt`;
-  const res = await fetch(url, {
-    headers: {
-      'Accept': 'application/json',
-      'Accept-Encoding': 'gzip',
-      'X-Subscription-Token': process.env.BRAVE_SEARCH_API_KEY,
-    },
+  const result = await page.evaluate(() => {
+    const allLines = (document.body.innerText || '')
+      .split('\n').map(s => s.trim()).filter(Boolean);
+
+    const NAV_ITEMS = new Set([
+      'Home','My Network','Jobs','Messaging','Notifications','Me',
+      'For Business','Learning','More','Connect','Message','Follow',
+      'Pending','Open to','Hiring','Promote profile',
+    ]);
+
+    // ── (1) Name — LinkedIn has no h1; name is the first non-nav line after "Learning"
+    // Nav bar ends with "Learning"; profile content starts immediately after.
+    let name = '';
+    let learningIdx = -1;
+    for (let i = 0; i < allLines.length; i++) {
+      if (allLines[i] === 'Learning') learningIdx = i;
+    }
+    if (learningIdx >= 0) {
+      for (let i = learningIdx + 1; i < Math.min(learningIdx + 6, allLines.length); i++) {
+        const l = allLines[i];
+        if (l && l.length > 2 && l.length < 80 && !l.match(/^\d/) && !NAV_ITEMS.has(l)) {
+          name = l;
+          break;
+        }
+      }
+    }
+    // Fallback: first two-word line without digits that isn't a nav item
+    if (!name) {
+      for (const l of allLines.slice(0, 30)) {
+        if (l.length > 3 && l.length < 60 && !l.match(/\d/) && l.includes(' ') && !NAV_ITEMS.has(l)) {
+          name = l;
+          break;
+        }
+      }
+    }
+
+    // ── (2) Location — "City, State, Country" pattern near name, for language detection
+    let location = '';
+    const nameIdx = name ? allLines.indexOf(name) : -1;
+    if (nameIdx >= 0) {
+      for (let i = nameIdx + 1; i < Math.min(nameIdx + 12, allLines.length); i++) {
+        const l = allLines[i];
+        if (l.toLowerCase().includes('connection') || l.toLowerCase().includes('follower')) break;
+        if (l.includes(',') && !l.match(/\d/) && l.length > 4 && l.length < 80) {
+          location = l;
+          break;
+        }
+      }
+    }
+
+    // ── (3) Title + (4) Company — primary source: Experience section ──────────
+    // Parse job entries; prefer "Present"/"Atual" entry, fall back to most recent.
+    const YEAR_RE    = /\d{4}/;
+    const PRESENT_RE = /\bpresent\b|\batual\b|\bo momento\b/i;
+    const MONTH_RE   = /^(Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec|Fev|Abr|Mai|Ago|Set|Out|Dez)/i;
+    const SECTION_END = /^(Education|Educação|Skills|Habilidades|Languages|Idiomas|Certifications|Certificações|Recomendações|Interests|Volunteer|Projects)$/i;
+
+    let title = '', company = '';
+
+    const expIdx = allLines.findIndex(l =>
+      l === 'Experience' || l === 'Experiência' || l === 'Cargo atual'
+    );
+
+    if (expIdx >= 0) {
+      const expLines = [];
+      for (let i = expIdx + 1; i < allLines.length; i++) {
+        if (SECTION_END.test(allLines[i])) break;
+        expLines.push(allLines[i]);
+      }
+
+      const entries = [];
+      for (let j = 0; j < expLines.length; j++) {
+        const l = expLines[j];
+        if (!l || l.length < 3 || YEAR_RE.test(l) || MONTH_RE.test(l)) continue;
+
+        let dateFound = false, isPresent = false, entryCompany = '';
+        for (let k = j + 1; k < Math.min(j + 6, expLines.length); k++) {
+          const next = expLines[k];
+          if (!next) continue;
+          if (YEAR_RE.test(next) || MONTH_RE.test(next)) {
+            dateFound = true;
+            isPresent = PRESENT_RE.test(next);
+            break;
+          }
+          if (!entryCompany && next.length > 1) {
+            entryCompany = next.includes(' · ') ? next.split(' · ')[0].trim() : next;
+          }
+        }
+
+        if (dateFound) entries.push({ title: l, company: entryCompany, isPresent });
+      }
+
+      const current = entries.find(e => e.isPresent) || entries[0];
+      if (current) { title = current.title; company = current.company; }
+    }
+
+    // ── Fallback for title — LinkedIn headline sits right after the name in the intro card
+    if (!title && nameIdx >= 0) {
+      for (let i = nameIdx + 1; i < Math.min(nameIdx + 6, allLines.length); i++) {
+        const l = allLines[i];
+        if (l && l.length > 3 && !NAV_ITEMS.has(l) && !l.startsWith('·') && l !== name) {
+          title = l;
+          break;
+        }
+      }
+    }
+
+    // ── Fallback for company — intro card shows current employer after "Contact info"
+    if (!company) {
+      const contactIdx = allLines.indexOf('Contact info');
+      if (contactIdx >= 0) {
+        for (let i = contactIdx + 1; i < Math.min(contactIdx + 5, allLines.length); i++) {
+          const l = allLines[i];
+          if (l && l.length > 1 && !l.match(/^\d/) && l !== '·' && !l.startsWith('·') && l !== 'See all') {
+            company = l;
+            break;
+          }
+        }
+      }
+    }
+
+    return { name, title, company, location };
   });
 
-  if (!res.ok) {
-    const body = await res.text();
-    throw new Error(`Brave Search error ${res.status}: ${body.slice(0, 200)}`);
+  if (!result.name) {
+    throw new Error(`Name empty — LinkedIn body did not contain a recognisable name after the nav`);
   }
 
-  const data = await res.json();
-  const results = data.web?.results || [];
-
-  // Return condensed text: title + description for each result
-  return results.map(r => `${r.title || ''}: ${r.description || ''}`).join('\n').slice(0, 2000);
-}
-
-// ── CLAUDE ICP ANALYSIS ───────────────────────────────────────────────────────
-
-const SYSTEM_PROMPT = `You are an ICP scoring assistant for Volmera — a Brazilian Yard Management System (YMS) SaaS.
-
-Volmera's three products:
-1. Volmera YMS — dock scheduling, truck slot booking, real-time yard visibility, detention cost reduction. Target: logistics managers, operations directors, terminal managers at agribusiness, manufacturers, 3PLs with high truck volume.
-2. Volmera Freight Marketplace — solves empty return trips and backhaul inefficiency. Target: logistics/fleet managers.
-3. Volmera Pallet Marketplace — connects pallet buyers with manufacturers. Target: procurement and supply chain managers.
-
-ICP: Brazilian logistics/operations professionals at companies with significant physical goods movement. Ideal titles: Gerente de Logística, Diretor de Logística, Supply Chain Manager, Terminal Manager, Gerente de Operações, Head of Operations, COO at mid-to-large companies.
-
-Score 1–10:
-- 9–10: Perfect fit — title + company size + industry all match
-- 7–8: Strong fit — right title or right industry
-- 5–6: Possible fit — adjacent role or unclear company
-- 3–4: Weak fit — tangential role or small company
-- 1–2: Not a fit
-
-You must respond with ONLY valid JSON, no explanation, no markdown.`;
-
-async function claudeAnalyze(profileUrl, username, searchResults) {
-  const userMsg = `LinkedIn profile: ${profileUrl}
-Username: ${username}
-
-Brave Search results:
-${searchResults || '(no results found)'}
-
-Extract available information and score this person's ICP fit for Volmera. If data is sparse, make a reasonable inference from the username and any available context.
-
-Respond with this exact JSON structure:
-{
-  "name": "Full Name or empty string if unknown",
-  "title": "Job title or empty string",
-  "company": "Company name or empty string",
-  "relevantProds": "Which Volmera products fit (YMS / Freight Marketplace / Pallet Marketplace) — pick the most relevant",
-  "opEstimate": "Brief estimate of their operation scale: Small / Medium / Large / Unknown",
-  "icpReason": "1–2 sentences explaining the ICP score",
-  "icpScore": 7
-}`;
-
-  const res = await fetch(CLAUDE_URL, {
-    method: 'POST',
-    headers: {
-      'x-api-key':          process.env.ANTHROPIC_API_KEY,
-      'anthropic-version':  '2023-06-01',
-      'content-type':       'application/json',
-    },
-    body: JSON.stringify({
-      model:      CLAUDE_MODEL,
-      max_tokens: 400,
-      system:     SYSTEM_PROMPT,
-      messages:   [{ role: 'user', content: userMsg }],
-    }),
-  });
-
-  if (!res.ok) {
-    const err = await res.text();
-    throw new Error(`Claude API error ${res.status}: ${err.slice(0, 200)}`);
-  }
-
-  const json = await res.json();
-  const text = json.content[0].text.trim();
-
-  // Parse JSON — strip any accidental markdown fencing
-  const clean = text.replace(/^```json?\s*/i, '').replace(/\s*```$/, '').trim();
-  const parsed = JSON.parse(clean);
-
-  // Validate required fields
-  return {
-    name:          String(parsed.name          || '').slice(0, 100),
-    title:         String(parsed.title         || '').slice(0, 100),
-    company:       String(parsed.company       || '').slice(0, 100),
-    relevantProds: String(parsed.relevantProds || '').slice(0, 200),
-    opEstimate:    String(parsed.opEstimate    || 'Unknown').slice(0, 50),
-    icpReason:     String(parsed.icpReason     || '').slice(0, 300),
-    icpScore:      Math.min(10, Math.max(1, Number(parsed.icpScore) || 1)),
-  };
-}
-
-// ── HELPERS ───────────────────────────────────────────────────────────────────
-
-function extractUsername(profileUrl) {
-  const match = String(profileUrl).match(/linkedin\.com\/in\/([^/?#]+)/);
-  return match ? decodeURIComponent(match[1]) : profileUrl;
-}
-
-function sleep(ms) {
-  return new Promise(resolve => setTimeout(resolve, ms));
+  return result;
 }
