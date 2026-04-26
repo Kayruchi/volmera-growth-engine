@@ -39,6 +39,6 @@ export function getActiveLocks() {
 }
 
 export function isAnyGrowthJobRunning() {
-  const growthJobs = ['crawl', 'fetch', 'enrich', 'pulse', 'invite', 'message', 'followup'];
+  const growthJobs = ['crawl', 'fetch', 'enrich', 'pulse', 'invite', 'connections', 'messages', 'message', 'followup'];
   return growthJobs.some(j => _locks.has(j));
 }

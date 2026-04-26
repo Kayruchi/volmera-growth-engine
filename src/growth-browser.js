@@ -34,7 +34,12 @@ export async function saveSession(context) {
 }
 
 export async function isLoggedIn(page) {
-  await page.goto('https://www.linkedin.com/feed/', { waitUntil: 'load', timeout: 45000 });
+  try {
+    await page.goto('https://www.linkedin.com/feed/', { waitUntil: 'domcontentloaded', timeout: 45000 });
+  } catch (e) {
+    // ERR_ABORTED = LinkedIn redirected mid-load — check where we landed
+    if (!e.message.includes('ERR_ABORTED')) throw e;
+  }
   const url = String(page.url());
   return url.includes('/feed') || url.includes('/in/');
 }

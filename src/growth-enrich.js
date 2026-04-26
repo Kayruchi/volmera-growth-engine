@@ -1,9 +1,9 @@
 // growth-enrich.js — Job 3: Enrich Profile Data
-// For each Fetched row: two Brave Search queries (person + company),
+// Primary enrichment job. For each Fetched row: Brave Search queries (person + company),
 // Claude ICP scoring based on combined real operation signals.
 // Status: Fetched → Enriched. No LinkedIn interaction.
 
-import { getRowsByStatus, batchUpdateRows } from './growth-sheets.js';
+import { getRowsByStatus, batchUpdateRows, appendBlacklist, deleteContactRow } from './growth-sheets.js';
 import { glog } from './growth-logger.js';
 
 const BRAVE_URL    = 'https://api.search.brave.com/res/v1/web/search';
@@ -34,7 +34,8 @@ export async function runEnrich({ limit = DEFAULT_ENRICH_LIMIT } = {}) {
   setProgress({ status: 'running', total: 0, done: 0, enriched: 0, failed: 0, current: null, error: null });
   glog.info(`[Enrich] Starting — limit: ${limit}`);
 
-  const updates = [];
+  const updates     = [];  // rows to write back as Enriched
+  const toBlacklist = [];  // rows flagged by Claude as blacklist candidates
 
   try {
     // ── Load Fetched rows ─────────────────────────────────────────────────────
@@ -55,23 +56,28 @@ export async function runEnrich({ limit = DEFAULT_ENRICH_LIMIT } = {}) {
       try {
         const data = await enrichProfile(row);
 
-        updates.push({
-          rowIndex: row.rowIndex,
-          data: {
-            relevantProds: data.relevantProds,
-            opEstimate:    data.opEstimate,
-            icpReason:     data.icpReason,
-            icpScore:      data.icpScore,
-            status:        'Enriched',
-          },
-        });
-
-        setProgress({ enriched: enrichProgress.enriched + 1 });
-        glog.info(`[Enrich] ${row.name} @ ${row.company} — score: ${data.icpScore} | ${data.relevantProds}`);
+        if (data.shouldBlacklist) {
+          // Claude flagged this company — queue for blacklist processing
+          toBlacklist.push({ row, reason: data.blacklistReason });
+          glog.info(`[Enrich] BLACKLIST — ${row.name} @ ${row.company} | reason: ${data.blacklistReason}`);
+        } else {
+          updates.push({
+            rowIndex: row.rowIndex,
+            data: {
+              relevantProds: data.relevantProds,
+              opEstimate:    data.opEstimate,
+              icpReason:     data.icpReason,
+              icpScore:      data.icpScore,
+              status:        'Enriched',
+            },
+          });
+          setProgress({ enriched: enrichProgress.enriched + 1 });
+          glog.info(`[Enrich] ${row.name} @ ${row.company} — score: ${data.icpScore} | ${data.relevantProds}`);
+        }
 
       } catch (e) {
         setProgress({ failed: enrichProgress.failed + 1 });
-        glog.warn(`[Enrich] Failed ${row.profileUrl}: ${e.message}`);
+        glog.error(`[Enrich] Failed ${row.profileUrl}: ${e.message}`);
         // Leave as Fetched — retried on next run
       }
 
@@ -83,22 +89,40 @@ export async function runEnrich({ limit = DEFAULT_ENRICH_LIMIT } = {}) {
       }
     }
 
-    // ── Batch write ───────────────────────────────────────────────────────────
+    // ── Write enriched rows ───────────────────────────────────────────────────
     if (updates.length > 0) {
-      glog.info(`[Enrich] Writing ${updates.length} rows to sheet...`);
+      glog.info(`[Enrich] Writing ${updates.length} enriched rows to sheet...`);
       await batchUpdateRows(updates);
       glog.info('[Enrich] Sheet updated');
     }
 
+    // ── Process blacklisted rows ──────────────────────────────────────────────
+    // Append to Blacklist first, then delete from Contacts in reverse rowIndex
+    // order so earlier indices are not shifted by prior deletions.
+    if (toBlacklist.length > 0) {
+      glog.info(`[Enrich] Moving ${toBlacklist.length} blacklisted contact(s) out of Contacts...`);
+      for (const { row, reason } of toBlacklist) {
+        await appendBlacklist({ name: row.name, profileUrl: row.profileUrl, reason });
+        glog.info(`[Enrich] Appended to Blacklist — ${row.name} | ${reason}`);
+      }
+      // Delete in reverse rowIndex order to avoid index drift
+      const sorted = [...toBlacklist].sort((a, b) => b.row.rowIndex - a.row.rowIndex);
+      for (const { row } of sorted) {
+        await deleteContactRow(row.rowIndex);
+        glog.info(`[Enrich] Deleted from Contacts — ${row.name} (row ${row.rowIndex})`);
+      }
+    }
+
     const result = {
-      total:       batch.length,
-      enriched:    enrichProgress.enriched,
-      failed:      enrichProgress.failed,
-      completedAt: new Date().toISOString(),
+      total:        batch.length,
+      enriched:     enrichProgress.enriched,
+      blacklisted:  toBlacklist.length,
+      failed:       enrichProgress.failed,
+      completedAt:  new Date().toISOString(),
     };
 
     setProgress({ status: 'done' });
-    glog.info(`[Enrich] Done — enriched: ${result.enriched}, failed: ${result.failed}`);
+    glog.info(`[Enrich] Done — enriched: ${result.enriched}, blacklisted: ${result.blacklisted}, failed: ${result.failed}`);
     return result;
 
   } catch (e) {
@@ -110,7 +134,7 @@ export async function runEnrich({ limit = DEFAULT_ENRICH_LIMIT } = {}) {
 
 // ── ENRICH ONE PROFILE ────────────────────────────────────────────────────────
 
-export async function enrichProfile(row, onBraveDone) {
+export async function enrichProfile(row) {
   const name    = row.name    || '';
   // "Not working" is written to the sheet when isCurrentRole===false — strip it here
   // so Brave searches use the real last company name, not a display label.
@@ -143,7 +167,6 @@ export async function enrichProfile(row, onBraveDone) {
     companyResearch = companyResearch.slice(0, 5000);
   }
 
-  onBraveDone?.();  // fires after all Brave searches — used by Batch 2 pipeline for live counter
   return await claudeScore(row, personResults, companyResearch);
 }
 
@@ -211,6 +234,17 @@ Any Brazilian company with significant physical goods movement. Target industrie
 
 **icpReason format:** Always return exactly 3 bullet points as a single string, each starting with "• ", separated by newline. Keep each bullet under 15 words. Cover: (1) role/seniority, (2) company/industry fit, (3) facility count and daily truck volume. Write entirely in English — translate job titles and company types, never use Portuguese words in your output.
 
+## Blacklist Detection
+You must also determine if this contact should be blacklisted. Set shouldBlacklist to true if the company is:
+- A software development house, IT services firm, or tech consultancy
+- A company that provides Yard Management System (YMS) software or services (our direct competitors)
+- A company that provides WMS, TMS, or ERP software to logistics/transport companies (software vendors)
+- Examples of blacklist types: TOTVS, SAP Brasil, Senior Sistemas, GoRamp, C3 Solutions, any SaaS/software company targeting logistics
+
+Do NOT blacklist: actual logistics operators, agribusiness companies, manufacturers, 3PLs, distributors — even if they use software. Only blacklist companies whose core business IS software/tech.
+
+If shouldBlacklist is true, set blacklistReason to a short phrase: "YMS competitor", "logistics software vendor", "software development house", or similar.
+
 **Role currency:** You receive a person search and a company research block (multiple search angles). Cross-check the scraped title/company against both. If the person has left the company or the role is clearly from the past, lower the score by 3–4 points and flag it in bullet 1. Use the company research to assess operation scale independently.
 
 **opEstimate — STRICT FORMAT, NO EXCEPTIONS:**
@@ -229,7 +263,7 @@ FORBIDDEN in opEstimate (put these in icpReason bullet 3 instead):
 - Any text beyond the two numbers and "facilities" / "trucks/day"
 - Never vague — always output specific numbers even when estimated
 
-You must respond with ONLY valid JSON, no explanation, no markdown fences.`;
+You must respond with ONLY valid JSON, no explanation, no markdown fences. Always include shouldBlacklist and blacklistReason.`;
 
 async function claudeScore(row, personSearchResults, companySearchResults) {
   // isCurrentRole: null = Experience section not parsed (unknown)
@@ -273,7 +307,9 @@ Respond with this exact JSON:
   "relevantProds": "YMS / Freight Marketplace / Pallet Marketplace — or a combination",
   "opEstimate": "X facilities, ~Y trucks/day (source: confirmed/estimated/inferred)",
   "icpReason": "• Role: ...\\n• Industry: ...\\n• Scale: X facilities, ~Y trucks/day",
-  "icpScore": 7
+  "icpScore": 7,
+  "shouldBlacklist": false,
+  "blacklistReason": ""
 }`;
 
   const res = await fetch(CLAUDE_URL, {
@@ -311,10 +347,12 @@ Respond with this exact JSON:
                  : rawScore;
 
   return {
-    relevantProds: String(parsed.relevantProds || '').slice(0, 200),
-    opEstimate:    String(parsed.opEstimate    || 'Unknown').slice(0, 150),
-    icpReason:     String(parsed.icpReason     || '').slice(0, 600),
+    relevantProds:   String(parsed.relevantProds   || '').slice(0, 200),
+    opEstimate:      String(parsed.opEstimate       || 'Unknown').slice(0, 150),
+    icpReason:       String(parsed.icpReason        || '').slice(0, 600),
     icpScore,
+    shouldBlacklist: parsed.shouldBlacklist === true,
+    blacklistReason: String(parsed.blacklistReason  || '').slice(0, 100),
   };
 }
 

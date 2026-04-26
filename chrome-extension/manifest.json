@@ -1,0 +1,21 @@
+{
+  "manifest_version": 3,
+  "name": "Volmera Growth — LinkedIn Connector",
+  "version": "3.15",
+  "description": "Local-only extension that sends LinkedIn connection invites on behalf of Volmera Growth Engine.",
+  "permissions": ["tabs", "scripting", "alarms"],
+  "host_permissions": [
+    "https://www.linkedin.com/*",
+    "http://localhost:3000/*"
+  ],
+  "background": {
+    "service_worker": "background.js"
+  },
+  "content_scripts": [
+    {
+      "matches": ["https://www.linkedin.com/in/*", "https://www.linkedin.com/mynetwork/*", "https://www.linkedin.com/messaging/*"],
+      "js": ["content.js"],
+      "run_at": "document_idle"
+    }
+  ]
+}

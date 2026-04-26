@@ -1,28 +1,56 @@
-// growth-fetch.js — Job 2: Fetch Profile Data (with pipeline enrich)
+// growth-fetch.js — Job 2: Fetch Profile Data
 // Playwright visits each Scraped profile URL, extracts Name, Title, Company.
-// Status: Scraped → Fetched → Enriched (inline, during LinkedIn delays).
-// Job 3 (Enrich) remains as a standalone button for re-enriching Fetched rows.
+// Status: Scraped → Fetched. No enrichment — that is Job 3 (growth-enrich.js).
 
 import { getLinkedInPage } from './growth-browser.js';
 import { getRowsByStatus, batchUpdateRows } from './growth-sheets.js';
-import { enrichProfile } from './growth-enrich.js';
 import { glog } from './growth-logger.js';
 
 export const DEFAULT_FETCH_LIMIT = 50;
 
+// ── URL NORMALIZER ────────────────────────────────────────────────────────────
+// LinkedIn profile URLs sometimes have a 2-letter locale suffix appended by browsers
+// or scraping tools: /in/username/en/ or /in/username/pt/
+// These locale suffixes cause LinkedIn to serve a DIFFERENT person's profile.
+// Always strip them before navigating to a profile.
+export function normalizeLinkedInUrl(url) {
+  if (!url) return url;
+  // Strip trailing 2-letter locale suffix from profile URLs
+  // e.g., /in/rui-cacela/en/ → /in/rui-cacela/
+  return url.replace(/(\/in\/[^/?#]+)\/[a-z]{2}\/?$/, '$1/');
+}
+
+// ── JUNK COMPANY FILTER ───────────────────────────────────────────────────────
+// LinkedIn shows placeholder texts in the Experience section when a profile has
+// no real experience entered. These must never be stored as company names.
+// Exported so growth-pulse.js can reuse the same filter.
+export function isLinkedInPlaceholder(text) {
+  if (!text || !text.trim()) return true;
+  const t = text.trim().toLowerCase();
+  return (
+    t.includes('will appear here') ||        // "Experience that X adds will appear here."
+    t.includes('adds will appear') ||
+    t === 'nothing to see for now' ||
+    t === 'no experience listed' ||
+    t === 'experience' ||
+    t === 'experiência' ||
+    t === 'no experiences listed' ||
+    t.startsWith('experience that') ||        // catch all variants of this pattern
+    t.includes('nothing here yet') ||
+    t.includes('no content available')
+  );
+}
+
 // ── IN-MEMORY PROGRESS ────────────────────────────────────────────────────────
 export const fetchProgress = {
-  status:       'idle',   // idle | running | done | error
-  total:        0,
-  done:         0,
-  fetched:      0,
-  braved:       0,   // rows where Brave Search completed
-  enriched:     0,   // rows where Claude ICP scoring completed
-  enrichFailed: 0,   // rows where background enrich failed (stay as Fetched for Batch 3 retry)
-  failed:       0,
-  current:      null,
-  error:        null,
-  updatedAt:    null,
+  status:    'idle',   // idle | running | done | error
+  total:     0,
+  done:      0,
+  fetched:   0,
+  failed:    0,
+  current:   null,
+  error:     null,
+  updatedAt: null,
 };
 
 function setProgress(update) {
@@ -32,11 +60,10 @@ function setProgress(update) {
 // ── MAIN EXPORT ───────────────────────────────────────────────────────────────
 
 export async function runFetch({ limit = DEFAULT_FETCH_LIMIT } = {}) {
-  setProgress({ status: 'running', total: 0, done: 0, fetched: 0, braved: 0, enriched: 0, enrichFailed: 0, failed: 0, current: null, error: null });
+  setProgress({ status: 'running', total: 0, done: 0, fetched: 0, failed: 0, current: null, error: null });
   glog.info(`[Fetch] Starting — limit: ${limit}`);
 
   let browser;
-  const enrichPromises = []; // background enrich tasks — run during LinkedIn delays
 
   try {
     // ── Load Scraped rows ─────────────────────────────────────────────────────
@@ -48,7 +75,7 @@ export async function runFetch({ limit = DEFAULT_FETCH_LIMIT } = {}) {
     if (batch.length === 0) {
       glog.warn('[Fetch] No Scraped rows — nothing to do');
       setProgress({ status: 'done' });
-      return { total: 0, fetched: 0, braved: 0, enriched: 0, failed: 0 };
+      return { total: 0, fetched: 0, failed: 0 };
     }
 
     // ── Launch LinkedIn browser ───────────────────────────────────────────────
@@ -62,80 +89,39 @@ export async function runFetch({ limit = DEFAULT_FETCH_LIMIT } = {}) {
       try {
         const data = await scrapeProfile(page, row.profileUrl);
 
-        // Write Name/Title/Company + Fetched status immediately.
-        // If isCurrentRole === false (confirmed past role, no current job), show "Not working"
-        // in the Company column. The real company name is kept in rowWithData for enrichment search.
+        // Write Name/Title/Company/Location + Fetched status.
+        // If isCurrentRole === false (confirmed past role), show "Not working" in Company.
         const displayCompany = data.isCurrentRole === false ? 'Not working' : data.company;
         await batchUpdateRows([{
           rowIndex: row.rowIndex,
-          data: { name: data.name, title: data.title, company: displayCompany, status: 'Fetched' },
+          data: { name: data.name, title: data.title, company: displayCompany, location: data.location || '', status: 'Fetched' },
         }]);
         setProgress({ fetched: fetchProgress.fetched + 1 });
         glog.info(`[Fetch] Scraped — "${data.name}" | "${data.title}" | "${data.company}" | current: ${data.isCurrentRole} | date: "${data.roleDate}"`);
 
-        // ── Fire background enrich — runs during next LinkedIn delay ──────────
-        // Merges scraped data into the row object so enrichProfile has real company name (not "Not working")
-        const rowWithData = { ...row, name: data.name, title: data.title, company: data.company, isCurrentRole: data.isCurrentRole, roleDate: data.roleDate };
-        const enrichTask = enrichProfile(rowWithData, () => {
-          setProgress({ braved: fetchProgress.braved + 1 });
-        })
-          .then(async (enrichData) => {
-            await batchUpdateRows([{
-              rowIndex: row.rowIndex,
-              data: {
-                relevantProds: enrichData.relevantProds,
-                opEstimate:    enrichData.opEstimate,
-                icpReason:     enrichData.icpReason,
-                icpScore:      enrichData.icpScore,
-                status:        'Enriched',
-              },
-            }]);
-            setProgress({ enriched: fetchProgress.enriched + 1 });
-            glog.info(`[Fetch] Enriched — "${data.name}" score: ${enrichData.icpScore} | ${enrichData.relevantProds}`);
-          })
-          .catch(e => {
-            setProgress({ enrichFailed: fetchProgress.enrichFailed + 1 });
-            glog.warn(`[Fetch] Background enrich failed for ${row.profileUrl}: ${e.message}`);
-            // Row stays as Fetched — Job 3 will pick it up on next run
-          });
-        enrichPromises.push(enrichTask);
-
       } catch (e) {
         setProgress({ failed: fetchProgress.failed + 1 });
-        glog.warn(`[Fetch] Scrape failed ${row.profileUrl}: ${e.message}`);
+        glog.error(`[Fetch] Scrape failed ${row.profileUrl}: ${e.message}`);
         // Row stays as Scraped — retried on next Job 2 run
       }
 
       setProgress({ done: fetchProgress.done + 1 });
 
-      // LinkedIn polite delay (3–5s) — background enrich runs during this window
+      // LinkedIn polite delay between profile visits
       if (fetchProgress.done < batch.length) {
         await page.waitForTimeout(3000 + Math.random() * 2000);
       }
     }
 
-    // ── Wait for any still-running enriches ───────────────────────────────────
-    if (enrichPromises.length > 0) {
-      const pending = enrichPromises.length - fetchProgress.enriched - fetchProgress.enrichFailed;
-      if (pending > 0) {
-        setProgress({ current: `Waiting for ${pending} enrichment(s) to finish...` });
-        glog.info(`[Fetch] Scraping done — waiting for ${pending} background enriches`);
-      }
-      await Promise.allSettled(enrichPromises);
-    }
-
     const result = {
-      total:        batch.length,
-      fetched:      fetchProgress.fetched,
-      braved:       fetchProgress.braved,
-      enriched:     fetchProgress.enriched,
-      enrichFailed: fetchProgress.enrichFailed,
-      failed:       fetchProgress.failed,
-      completedAt:  new Date().toISOString(),
+      total:       batch.length,
+      fetched:     fetchProgress.fetched,
+      failed:      fetchProgress.failed,
+      completedAt: new Date().toISOString(),
     };
 
     setProgress({ status: 'done', current: null });
-    glog.info(`[Fetch] Done — fetched: ${result.fetched}, enriched: ${result.enriched}, enrichFailed: ${result.enrichFailed}, failed: ${result.failed}`);
+    glog.info(`[Fetch] Done — fetched: ${result.fetched}, failed: ${result.failed}`);
     return result;
 
   } catch (e) {
@@ -152,7 +138,11 @@ export async function runFetch({ limit = DEFAULT_FETCH_LIMIT } = {}) {
 // ── PROFILE SCRAPER ───────────────────────────────────────────────────────────
 
 export async function scrapeProfile(page, profileUrl) {
-  await page.goto(profileUrl, { waitUntil: 'domcontentloaded', timeout: 30000 });
+  const safeUrl = normalizeLinkedInUrl(profileUrl);
+  if (safeUrl !== profileUrl) {
+    glog.warn(`[Fetch] URL normalized: ${profileUrl} → ${safeUrl}`);
+  }
+  await page.goto(safeUrl, { waitUntil: 'domcontentloaded', timeout: 30000 });
   await page.waitForTimeout(4000); // fixed wait — no waitFor, no polling
 
   // Detect auth wall / login redirect
@@ -434,6 +424,14 @@ export async function scrapeProfile(page, profileUrl) {
     throw new Error(`Name empty — LinkedIn body did not contain a recognisable name after the nav`);
   }
 
+  // ── Clean junk company text (runs in Node.js — NOT inside page.evaluate) ────
+  // LinkedIn placeholder texts are stored as the company name when a profile has no
+  // real experience entered. Detect them here and treat the person as "Not working".
+  if (isLinkedInPlaceholder(result.company)) {
+    result.company      = '';
+    if (result.isCurrentRole !== true) result.isCurrentRole = false;
+  }
+
   // ── /details/experience/ fallback ─────────────────────────────────────────────
   // LinkedIn hides the Experience section on the main profile page for non-connected
   // profiles. When no Experience data was extracted (title empty, isCurrentRole null),
@@ -524,8 +522,8 @@ export async function scrapeProfile(page, profileUrl) {
           result.title         = expData.title;
           result.isCurrentRole = expData.isCurrentRole;
           result.roleDate      = expData.roleDate;
-          // Only overwrite company if Experience gave us one — don't erase Contact info fallback
-          if (expData.company) result.company = expData.company;
+          // Only overwrite company if Experience gave us a real (non-junk) value
+          if (expData.company && !isLinkedInPlaceholder(expData.company)) result.company = expData.company;
         }
       }
     } catch (e) {
